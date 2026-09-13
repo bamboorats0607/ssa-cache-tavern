@@ -84,27 +84,29 @@
   });
 
   /**
-   * 背景：默认取当前角色的头像全图铺开（用户原话「头像全图默认作为背景」）；
-   * 用户可在「外观」页改为自定义图片 / 短视频（见 background store）。
+   * 背景：**按角色**解析（背景是单个角色的立绘，不是全局通用设置）。
    *
+   * 归属键 = 当前角色头像文件名（后端 avatar_url），与 store 的 perCharacter 键一致。
    * 解析顺序（每层都可能为空）：
-   *   自定义媒体（未被判定失败）→ 角色头像 → 不渲染
-   * 自定义媒体**加载失败**时回落到头像（用户明确要求）；失败标记是瞬时的，
-   * 切换媒体 / 角色后自动复位，不改动用户设置。
+   *   该角色的自定义媒体（未被判定失败）→ 该角色头像 → 不渲染
+   * 自定义媒体**加载失败**时回落到该角色头像（用户明确要求）；失败标记是瞬时的，
+   * 切换角色 / 更换媒体后自动复位，不改动任何角色的设置。
    */
+  const activeKey = $derived(characters.fallback?.avatar ?? null);
+  const activeBg = $derived(background.forCharacter(activeKey));
+
   const avatarArtUrl = $derived(characterAvatarUrl(characters.fallback?.avatar));
   const customArtUrl = $derived(
-    background.state.mode === 'custom' && background.state.file
-      ? characterBackgroundUrl(background.state.file)
-      : null,
+    activeBg.mode === 'custom' && activeBg.file ? characterBackgroundUrl(activeBg.file) : null,
   );
 
   let customFailed = $state(false);
   let avatarFailed = $state(false);
 
-  // 更换自定义媒体 / 角色头像时复位失败标记（仅读对应 URL，不读失败标记本身，无回环）
+  // 切换角色 / 更换媒体时复位失败标记（读 URL 与角色键，不读失败标记本身，无回环）
   $effect(() => {
     void customArtUrl;
+    void activeKey;
     customFailed = false;
     background.markDegraded(false);
   });
@@ -116,7 +118,7 @@
   const usingCustom = $derived(!!customArtUrl && !customFailed);
   const bgArtUrl = $derived(usingCustom ? customArtUrl : avatarFailed ? null : avatarArtUrl);
   // 自定义媒体类型对齐上游 backgrounds 契约的 `mediaType: 'video' | 'image'`；默认头像恒为图片
-  const bgType = $derived(usingCustom ? background.state.mediaType : ('image' as const));
+  const bgType = $derived(usingCustom ? activeBg.mediaType : ('image' as const));
   // 自定义媒体整幅铺满（气泡不让位）；默认头像沿用 2:3 让位策略
   const bgFit = $derived<'auto' | 'cover'>(usingCustom ? 'cover' : 'auto');
 
@@ -124,19 +126,19 @@
     if (usingCustom) {
       customFailed = true;
       background.markDegraded(true);
-      logger.warn('background', '自定义背景加载失败，已回落到角色头像');
+      logger.warn('background', '自定义背景加载失败，已回落到角色头像', { character: activeKey });
     } else {
       avatarFailed = true;
     }
   }
 </script>
 
-<!-- 背景层：极简渐变 + 媒体位（角色头像 / 自定义图片 / 自定义短视频） -->
+<!-- 背景层：极简渐变 + 媒体位（角色头像 / 该角色的自定义图片或短视频） -->
 <BackgroundShader
   art={bgArtUrl}
   type={bgType}
   fit={bgFit}
-  dim={background.state.dim}
+  dim={background.dim}
   onerror={onBgMediaError}
 />
 

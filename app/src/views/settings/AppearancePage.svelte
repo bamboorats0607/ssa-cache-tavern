@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * 外观页：主题 + 字号 + 对话背景。
+   * 外观页：主题 + 字号 + 对话背景（**按角色**设置）。
    */
   import SubPage from '../../lib/settings/SubPage.svelte';
   import SettingGroup from '../../lib/settings/SettingGroup.svelte';
@@ -9,6 +9,7 @@
   import ThemePicker from '../../lib/ThemePicker.svelte';
   import { advanced } from '../../stores/advanced.svelte';
   import { background } from '../../stores/background.svelte';
+  import { characters } from '../../stores/characters.svelte';
   import { theme, THEMES } from '../../stores/theme.svelte';
   import { uploadBackground } from '../../lib/backend';
 
@@ -19,34 +20,41 @@
 
   const currentTheme = $derived(THEMES.find((t) => t.id === theme.current)?.name ?? '—');
 
-  // ── 对话背景 ──────────────────────────────────────────────────────────────
-  // 媒体本体走后端上传，localStorage 只存文件名（见 background store 顶部说明）。
+  // ── 对话背景（按角色）────────────────────────────────────────────────────
+  // 背景属于**单个角色**：这里始终作用于「当前角色」。当前角色键 = 头像文件名
+  // （与 store 的 perCharacter 键一致，见 background store 顶部说明）。
+  // 媒体本体走后端上传，localStorage 只存文件名。
+  const activeKey = $derived(characters.fallback?.avatar ?? null);
+  const activeName = $derived(characters.fallback?.name ?? null);
+  const activeBg = $derived(background.forCharacter(activeKey));
+
   let imageInput = $state<HTMLInputElement | null>(null);
   let videoInput = $state<HTMLInputElement | null>(null);
   let uploading = $state(false);
   let uploadError = $state<string | null>(null);
 
-  const isAuto = $derived(background.state.mode === 'auto');
-  const isImage = $derived(background.state.mode === 'custom' && background.state.mediaType === 'image');
-  const isVideo = $derived(background.state.mode === 'custom' && background.state.mediaType === 'video');
+  const isAuto = $derived(activeBg.mode === 'auto');
+  const isImage = $derived(activeBg.mode === 'custom' && activeBg.mediaType === 'image');
+  const isVideo = $derived(activeBg.mode === 'custom' && activeBg.mediaType === 'video');
 
   const sourceValue = $derived.by(() => {
-    if (background.state.mode === 'custom' && background.state.file) {
-      const kind = background.state.mediaType === 'video' ? '视频' : '图片';
-      return `${kind}：${background.state.file}`;
+    if (activeBg.mode === 'custom' && activeBg.file) {
+      const kind = activeBg.mediaType === 'video' ? '视频' : '图片';
+      return `${kind}：${activeBg.file}`;
     }
-    return '角色头像（默认）';
+    return activeName ? '角色头像（默认）' : '未选择角色';
   });
 
   const sourceDesc = $derived(
-    background.degraded
-      ? '自定义背景加载失败，已临时回落到角色头像'
-      : background.state.mode === 'custom'
-        ? '加载失败时会自动回落到角色头像'
-        : '把当前角色的头像全图铺满为背景',
+    !activeName
+      ? '先在「角色」页选择一个角色'
+      : background.degraded
+        ? `「${activeName}」的自定义背景加载失败，已临时回落到该角色头像`
+        : `仅对当前角色「${activeName}」生效；加载失败时回落到该角色头像`,
   );
 
   function openPicker(kind: 'image' | 'video') {
+    if (!activeKey) return;
     uploadError = null;
     (kind === 'image' ? imageInput : videoInput)?.click();
   }
@@ -56,7 +64,8 @@
     const file = input.files?.[0];
     // 清空 value，允许用户重复选择同一个文件
     input.value = '';
-    if (!file) return;
+    if (!file || !activeKey) return;
+    const key = activeKey;
     uploading = true;
     uploadError = null;
     const res = await uploadBackground(file);
@@ -65,7 +74,8 @@
       uploadError = res.error ?? '上传失败';
       return;
     }
-    background.useCustom(res.filename, kind);
+    // 归属到发起上传时的角色（上传期间用户可能已切换，这里按快照写入，避免串角色）
+    background.useCustom(key, res.filename, kind);
   }
 </script>
 
@@ -95,15 +105,34 @@
     <SettingRow label="背景来源" value={sourceValue} desc={sourceDesc} stacked>
       {#snippet trailing()}
         <div class="bg-actions">
-          <button class="btn" class:on={isAuto} onclick={() => background.useAuto()}>默认</button>
-          <button class="btn" class:on={isImage} disabled={uploading} onclick={() => openPicker('image')}>
+          <button
+            class="btn"
+            class:on={isAuto}
+            disabled={!activeKey}
+            onclick={() => activeKey && background.useAuto(activeKey)}
+          >
+            默认
+          </button>
+          <button
+            class="btn"
+            class:on={isImage}
+            disabled={!activeKey || uploading}
+            onclick={() => openPicker('image')}
+          >
             选择图片
           </button>
-          <button class="btn" class:on={isVideo} disabled={uploading} onclick={() => openPicker('video')}>
+          <button
+            class="btn"
+            class:on={isVideo}
+            disabled={!activeKey || uploading}
+            onclick={() => openPicker('video')}
+          >
             选择视频
           </button>
           {#if !isAuto}
-            <button class="btn" onclick={() => background.useAuto()}>清除</button>
+            <button class="btn" disabled={!activeKey} onclick={() => activeKey && background.useAuto(activeKey)}>
+              清除
+            </button>
           {/if}
         </div>
       {/snippet}
@@ -116,8 +145,8 @@
           max={90}
           step={5}
           unit="%"
-          value={background.get('dim')}
-          onchange={(v) => background.set('dim', Number(v))}
+          value={background.dim}
+          onchange={(v) => background.setDim(Number(v))}
         />
       {/snippet}
     </SettingRow>
@@ -148,7 +177,10 @@
 
   <section class="note">
     <p>主题只改变配色变量，切换即时生效并自动记忆；背景图不再受主题颜色影响。</p>
-    <p>自定义背景会上传到本机酒馆后端，本机仅保存文件名；加载失败时自动回落到角色头像。</p>
+    <p>
+      背景按角色保存：给某个角色选的图片/视频只在该角色下生效，其它角色各用自己的头像（或各自选定的媒体）。
+      媒体会上传到本机酒馆后端，本机仅保存文件名；加载失败时自动回落到该角色头像。
+    </p>
   </section>
 </SubPage>
 
