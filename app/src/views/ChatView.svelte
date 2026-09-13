@@ -18,6 +18,9 @@
   import { ctxConfig } from '../stores/context.svelte';
   import { worldbook } from '../stores/worldbook.svelte';
   import { sessions } from '../stores/sessions.svelte';
+  import { groups } from '../stores/groups.svelte'; // [SSA-GROUP]
+  import { advanceIdle, pickSpeaker } from '../lib/group-speaker'; // [SSA-GROUP]
+  import type { GroupReply, GroupSessionRecord } from '../lib/group-session-codec'; // [SSA-GROUP]
   import { logger } from '../lib/logger';
   import { pushBack } from '../lib/back';
 
@@ -31,6 +34,12 @@
     images?: string[];
     /** 所属轮次 id（用于撤销/改写/重新生成定位；进行中一轮无 id） */
     turnId?: string;
+    /**
+     * 发言人：角色头像文件名（**仅群聊**使用）。
+     * 单角色路径恒为 undefined，气泡走 `activeAvatarUrl`；
+     * 群聊**禁止**对所有助手气泡复用同一头像（spec R13），故按发言人解析。
+     */
+    speaker?: string;
   }
 
   interface Props {
@@ -56,8 +65,8 @@
 
   /** 单条消息最多附带的图片张数（受 localStorage 配额约束） */
   const MAX_IMAGES = 4;
-  /** 本地图片 file input（隐藏，由按钮触发） */
-  let fileInput: HTMLInputElement | undefined;
+  /** 本地图片 file input（隐藏，由按钮触发）。用 $state：群模式下该控件会被条件块卸载 */
+  let fileInput = $state<HTMLInputElement | undefined>();
   /** 已选待发送的图片（data URL） */
   let selectedImages = $state<string[]>([]);
   /** 图片处理过程中的可见提示（如超出张数限制） */
@@ -176,6 +185,87 @@
   /** 当前打开的对话 */
   const activeSession = $derived(sessions.active);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // 群聊模式 // [SSA-GROUP]
+  //
+  // 开关与当前群都由 groups store 决定（flag 默认关 → 这里全是 null，单角色路径不受影响）。
+  // 三条硬约束：
+  //  · 群记录只进 `tavern.groupSessions`，**绝不**写 `tavern.sessions`（R9/C-02）；
+  //  · 群聊**禁带图片**，故群模式下不提供附图入口（C-03/R3）；
+  //  · 发言人由**本地确定性状态机**选出（C-10，不调用模型）。
+  // ══════════════════════════════════════════════════════════════════════════
+
+  /** 当前群（未启用或未选中时为 null） */
+  const activeGroup = $derived(groups.enabled ? groups.active : null);
+  /** 是否处于群聊模式 */
+  const groupMode = $derived(activeGroup !== null);
+  /** 当前群的最近一条群会话（无则 null；发送时懒创建） */
+  const groupSession = $derived.by<GroupSessionRecord | null>(() => {
+    const g = activeGroup;
+    if (!g) return null;
+    return groups.listForGroup(g.id)[0] ?? null;
+  });
+  /**
+   * 群事实槽：**属于群会话**（不是发言人）——切群会话重置，切发言人**不**重置。
+   * 与单角色 `factState` 并列且互不共用（单角色路径行为不变）。
+   */
+  let groupFactState: FactSlotState | null = null;
+  /** 每人「距上次发言轮数」（轮空补偿用） */
+  let groupIdle = $state<Record<string, number>>({});
+  /** 手动指定下一位发言人（点头像 / 点快捷发言） */
+  let forcedSpeaker = $state<string | null>(null);
+  /** 进行中的群发言（临时层，落盘后清空） */
+  let pendingGroup = $state<{ userText: string; speakerKey: string; text: string } | null>(null);
+
+  /** 换群会话时重置群级上下文（事实槽 + 轮空计数 + 手动指定） */
+  $effect(() => {
+    void (groupSession?.id ?? null);
+    groupFactState = null;
+    groupIdle = {};
+    forcedSpeaker = null;
+  });
+
+  const speakerKeys = $derived(activeGroup?.memberKeys ?? []);
+
+  /** 发言人头像文件名 → 显示名（找不到时回落文件名，保证可渲染）。 */
+  function speakerNameOf(key: string): string {
+    return characters.list.find((c) => c.avatar === key)?.name ?? key;
+  }
+  /** 发言人设定（组装「发言人卡」用；空则不注入该块） */
+  function speakerDescOf(key: string): string | undefined {
+    return characters.list.find((c) => c.avatar === key)?.description;
+  }
+  /** 某成员是否被静音 */
+  function isMuted(key: string): boolean {
+    return activeGroup?.mutedKeys.includes(key) ?? false;
+  }
+  /** 最近一位发言人（从已落盘轮次里取最后一条回复的发言人） */
+  function lastSpeakerOf(rec: GroupSessionRecord | null): string | null {
+    if (!rec) return null;
+    for (let i = rec.turns.length - 1; i >= 0; i--) {
+      const rs = rec.turns[i].replies;
+      if (rs.length > 0) return rs[rs.length - 1].speakerKey;
+    }
+    return null;
+  }
+
+  /**
+   * 群历史**扁平化**：按发生顺序展开成 `{role,text}` 序列（用户 + 各成员回复）。
+   * 必须扁平：事实槽/检索叶/活簇都从同一份 history 取输入（infra-research 补点 1），
+   * 且一轮只推进一次事实槽（补点：union 抽一次）。
+   */
+  function flattenGroupHistory(rec: GroupSessionRecord | null): { role: 'user' | 'assistant'; text: string }[] {
+    const out: { role: 'user' | 'assistant'; text: string }[] = [];
+    if (!rec) return out;
+    for (const t of rec.turns) {
+      if (t.userText.trim()) out.push({ role: 'user', text: t.userText });
+      for (const r of t.replies) {
+        if (r.text.trim()) out.push({ role: 'assistant', text: `${speakerNameOf(r.speakerKey)}：${r.text}` });
+      }
+    }
+    return out;
+  }
+
   /**
    * 渲染用的消息列表 = 已落盘的轮次（派生） + 进行中的一轮（临时）。
    *
@@ -185,6 +275,35 @@
    */
   const messages = $derived.by<Msg[]>(() => {
     const out: Msg[] = [];
+    // ── 群聊：消息从**群会话**派生（与单角色完全并列的另一条来源）// [SSA-GROUP] ──
+    if (groupMode) {
+      const s = groupSession;
+      if (s) {
+        for (const t of s.turns) {
+          if (t.userText) out.push({ id: `${t.id}-u`, role: 'user', text: t.userText, turnId: t.id });
+          for (const r of t.replies) {
+            out.push({
+              id: `${t.id}-${r.id}`,
+              role: 'assistant',
+              text: r.text,
+              stats: r.stats,
+              speaker: r.speakerKey,
+              turnId: t.id,
+            });
+          }
+        }
+      }
+      if (pendingGroup) {
+        out.push({ id: 'pending-gu', role: 'user', text: pendingGroup.userText });
+        out.push({
+          id: 'pending-ga',
+          role: 'assistant',
+          text: pendingGroup.text,
+          speaker: pendingGroup.speakerKey,
+        });
+      }
+      return out;
+    }
     const s = activeSession;
     if (s) {
       for (const t of s.turns) {
@@ -316,6 +435,149 @@
     if (!characters.loaded) await characters.load();
   }
 
+  /**
+   * 群聊一轮：落用户消息 → **本地状态机**选发言人 → 群上下文组装 → 流式生成 → 落盘。
+   *
+   * 与单角色路径的四处关键差异（spec 硬约束）：
+   *  1. 记录只进 `tavern.groupSessions`（`groups.*`），**绝不**碰 `tavern.sessions`（R9/C-02）；
+   *  2. **不发图**：群记录禁带 data URL（C-03/R3），故本函数无 images 参数；
+   *  3. 选发言人不调用模型（C-10）；手动指定（点头像）优先；
+   *  4. 事实槽归属**群会话**：切发言人不重置，仅换群会话时重置（infra-research v1 语义）。
+   *
+   * 用户消息**先落盘再生成**：生成中被杀进程也不会丢用户这一轮（spec G4-1）。
+   */
+  async function sendGroupText(text: string) {
+    const g = activeGroup;
+    if (!g || service !== 'ready' || generating || !text.trim()) return;
+    errorText = '';
+    await ensureCharacters();
+    if (g.memberKeys.length === 0) {
+      errorText = '这个群还没有成员';
+      return;
+    }
+
+    // 1) 选发言人：确定性状态机（事件来自用户文本 / 上一发言者 / 轮空 / 手动指定）
+    const mentioned =
+      g.memberKeys.find((k) => {
+        const n = speakerNameOf(k);
+        return n && n !== k && text.includes(n);
+      }) ?? null;
+    const pick = pickSpeaker({
+      network: g.network,
+      mutedKeys: g.mutedKeys,
+      events: {
+        mentionedByUserKey: mentioned,
+        lastSpeakerKey: lastSpeakerOf(groupSession),
+        forcedKey: forcedSpeaker,
+        idleTurns: groupIdle,
+      },
+    });
+    const speakerKey = pick.speakerKey;
+    if (!speakerKey) {
+      errorText = '所有成员都被静音了，先取消静音再发送';
+      return;
+    }
+
+    // 2) 先落用户这一轮（replies 暂空），拿到 turnId 供生成完成后回填
+    const rec = groupSession ?? groups.createSession(g.id, g.name);
+    const before = groups.listForGroup(g.id).find((s) => s.id === rec.id) ?? rec;
+    const saved = groups.appendTurn(rec.id, {
+      at: Date.now(),
+      userText: text,
+      replies: [],
+      pickReason: pick.reason,
+    });
+    const turnId = saved?.turns[saved.turns.length - 1]?.id ?? null;
+
+    // 3) 组装：**扁平化**多发言人历史 + 群上下文
+    const flat = flattenGroupHistory(before);
+    const { turns, stats: baseStats, factState: nextFacts } = buildContext({
+      entries: activeEntries,
+      history: [...flat, { role: 'user', text }],
+      charName: speakerNameOf(speakerKey),
+      cfg: { ...ctxConfig.toSsaConfig(), maxContext: modelConfig.maxContext },
+      factState: groupFactState ?? undefined,
+      group: {
+        memberNames: g.memberKeys.map(speakerNameOf),
+        speakerName: speakerNameOf(speakerKey),
+        speakerDescription: speakerDescOf(speakerKey),
+      },
+    });
+
+    // 4) 流式生成
+    pendingGroup = { userText: text, speakerKey, text: '' };
+    generating = true;
+    scrollToBottom();
+    abortCtl = new AbortController();
+    const startedAt = Date.now();
+
+    try {
+      const result = await generateReply(
+        {
+          messages: turns,
+          model: modelConfig.model,
+          temperature: modelConfig.temp,
+          frequencyPenalty: modelConfig.freqPen,
+          presencePenalty: modelConfig.presPen,
+          topP: modelConfig.topP,
+          maxTokens: modelConfig.maxTokens,
+          stream: modelConfig.stream,
+          thinking: modelConfig.thinking,
+          source: 'custom',
+          customUrl: modelConfig.apiUrl || undefined,
+          apiKey: modelConfig.apiKey || undefined,
+          userName: modelConfig.userName,
+          charName: speakerNameOf(speakerKey),
+          signal: abortCtl.signal,
+        },
+        (full) => {
+          if (pendingGroup) pendingGroup = { ...pendingGroup, text: full };
+          scrollToBottom();
+        },
+      );
+
+      let finalText = result.text.trim();
+      if (!finalText) {
+        finalText = result.reasoning ? '（模型只返回了思考内容，没有正文）' : '（模型没有返回内容）';
+      }
+      const replyStats = mergeUsage(baseStats, result.usage as TokenUsage | undefined, finalText);
+      const reply: GroupReply = {
+        id: `gr_${Date.now().toString(36)}`,
+        speakerKey,
+        text: finalText,
+        stats: replyStats,
+        durationMs: Date.now() - startedAt,
+        model: modelConfig.model || '后端默认',
+      };
+      if (turnId) groups.replaceReplies(rec.id, turnId, [reply]);
+      groupIdle = advanceIdle(groupIdle, g.memberKeys, speakerKey);
+      groupFactState = nextFacts ?? null;
+      forcedSpeaker = null;
+      pendingGroup = null;
+      logger.debug('chat', '群聊本轮完成', {
+        group: g.id,
+        speaker: speakerKey,
+        reason: pick.reason,
+        chars: finalText.length,
+        cached: replyStats.cachedTokens,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('abort')) {
+        // 用户主动中断：保留已落盘的用户消息（无回复轮），不写半成品回复
+        pendingGroup = null;
+        logger.info('chat', '群聊本轮被中断', { group: g.id });
+      } else {
+        errorText = msg;
+        pendingGroup = null;
+        logger.error('chat', '群聊发送失败', msg);
+      }
+    } finally {
+      generating = false;
+      abortCtl = null;
+    }
+  }
+
   async function send() {
     const text = draft.trim();
     const images = selectedImages;
@@ -323,6 +585,11 @@
     draft = '';
     selectedImages = [];
     imageHint = '';
+    // 群聊走独立发送路径（不发图、不写 tavern.sessions）// [SSA-GROUP]
+    if (groupMode) {
+      await sendGroupText(text);
+      return;
+    }
     await sendText(text, images);
   }
 
@@ -571,45 +838,92 @@
 </script>
 
 <div class="chat">
-  <!-- 顶栏：角色 + 当前对话（点对话名展开切换列表） -->
+  <!-- 顶栏：角色（或群）+ 当前对话（点对话名展开切换列表） -->
   <header class="topbar glass">
     <div class="who">
-      <Avatar src={activeAvatarUrl} name={activeChar?.name} fallbackChar="T" size={38} />
-      <div class="who-text">
-        <div class="who-name">{activeChar?.name ?? 'Tavern'}</div>
-        <!-- 当前对话名：点击展开列表。放在角色名下方，让「角色 → 多条对话」的层级一眼可见 -->
-        <button
-          class="who-conv"
-          onclick={() => (convOpen = !convOpen)}
-          aria-expanded={convOpen}
-          aria-label="切换对话"
-          disabled={generating}
-        >
-          <span class="truncate">{activeSession?.title ?? '新对话'}</span>
-          {#if charSessions.length > 1}
-            <span class="conv-count">{charSessions.length}</span>
-          {/if}
-          <svg class="chev" class:open={convOpen} viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
-      </div>
+      {#if groupMode}
+        <!-- 群聊：用成员头像叠一个标记块，标题为群名 // [SSA-GROUP] -->
+        <span class="group-mark" aria-hidden="true">群</span>
+        <div class="who-text">
+          <div class="who-name">{activeGroup?.name ?? '群聊'}</div>
+          <span class="who-sub">{speakerKeys.length} 位成员 · {groupSession ? groups.statsOf(groupSession).replies : 0} 条发言</span>
+        </div>
+      {:else}
+        <Avatar src={activeAvatarUrl} name={activeChar?.name} fallbackChar="T" size={38} />
+        <div class="who-text">
+          <div class="who-name">{activeChar?.name ?? 'Tavern'}</div>
+          <!-- 当前对话名：点击展开列表。放在角色名下方，让「角色 → 多条对话」的层级一眼可见 -->
+          <button
+            class="who-conv"
+            onclick={() => (convOpen = !convOpen)}
+            aria-expanded={convOpen}
+            aria-label="切换对话"
+            disabled={generating}
+          >
+            <span class="truncate">{activeSession?.title ?? '新对话'}</span>
+            {#if charSessions.length > 1}
+              <span class="conv-count">{charSessions.length}</span>
+            {/if}
+            <svg class="chev" class:open={convOpen} viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+        </div>
+      {/if}
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn" onclick={newSession} disabled={generating} aria-label="新建对话" title="新建对话">
-        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
-      </button>
+      {#if !groupMode}
+        <button class="icon-btn" onclick={newSession} disabled={generating} aria-label="新建对话" title="新建对话">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+        </button>
+      {/if}
       {#if onOpenCharacters}
-        <button class="switch-char" onclick={onOpenCharacters} aria-label="切换角色">
+        <button class="switch-char" onclick={onOpenCharacters} aria-label={groupMode ? '切换群/角色' : '切换角色'}>
           <svg viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 00-2 2v3m0 8v3a2 2 0 002 2h3m8-18h3a2 2 0 012 2v3m0 8v3a2 2 0 01-2 2h-3" /></svg>
           <span>切换</span>
+        </button>
+      {/if}
+      {#if groupMode}
+        <button class="icon-btn" onclick={() => groups.setActive(null)} aria-label="退出群聊" title="退出群聊（回到单角色）">
+          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
         </button>
       {/if}
     </div>
   </header>
 
+  {#if groupMode}
+    <!-- 成员条：点头像 = 让 TA 说；长按 = 静音/取消静音 // [SSA-GROUP] -->
+    <div class="member-bar glass" role="toolbar" aria-label="群成员">
+      {#each speakerKeys as key (key)}
+        <button
+          class="member"
+          class:muted={isMuted(key)}
+          class:forced={forcedSpeaker === key}
+          onclick={() => (forcedSpeaker = forcedSpeaker === key ? null : key)}
+          oncontextmenu={(e) => { e.preventDefault(); activeGroup && groups.toggleMute(activeGroup.id, key); }}
+          onpointerdown={(e) => {
+            if (e.button !== 0) return;
+            const t = window.setTimeout(() => { if (activeGroup) groups.toggleMute(activeGroup.id, key); }, 550);
+            const clear = () => window.clearTimeout(t);
+            window.addEventListener('pointerup', clear, { once: true });
+            window.addEventListener('pointercancel', clear, { once: true });
+          }}
+          aria-pressed={forcedSpeaker === key}
+          title={`${speakerNameOf(key)}（点击让其发言；长按静音）`}
+        >
+          <Avatar src={characterAvatarUrl(key)} name={speakerNameOf(key)} size={30} />
+          <span class="member-name">{speakerNameOf(key)}</span>
+          {#if isMuted(key)}<span class="member-muted" aria-hidden="true">静音</span>{/if}
+        </button>
+      {/each}
+      {#if forcedSpeaker}
+        <span class="member-hint">下一条由 {speakerNameOf(forcedSpeaker)} 回复</span>
+      {/if}
+    </div>
+  {/if}
+
   <!-- 对话列表：当前角色的全部对话线（切换 / 新建 / 删除） -->
-  {#if convOpen}
+  {#if convOpen && !groupMode}
     <div class="conv-list glass">
       <div class="conv-head">
         <span class="conv-title">{activeChar?.name ?? '角色'} 的对话</span>
@@ -681,15 +995,15 @@
             text={m.text}
             stats={m.stats}
             images={m.images}
-            avatarUrl={activeAvatarUrl}
-            avatarName={activeChar?.name}
-            canEditUser={m.role === 'user'}
-            canRegenerate={m.role === 'assistant'}
-            onUndo={!generating && m.turnId
+            avatarUrl={m.speaker ? characterAvatarUrl(m.speaker) : activeAvatarUrl}
+            avatarName={m.speaker ? speakerNameOf(m.speaker) : activeChar?.name}
+            canEditUser={!groupMode && m.role === 'user'}
+            canRegenerate={!groupMode && m.role === 'assistant'}
+            onUndo={!groupMode && !generating && m.turnId
               ? () => (m.role === 'user' ? undoFromUser(m.turnId!) : undoAssistant(m.turnId!))
               : undefined}
-            onRewrite={!generating && m.turnId ? () => rewriteUser(m.turnId!) : undefined}
-            onRegenerate={!generating && m.turnId ? () => regenerateAssistant(m.turnId!) : undefined}
+            onRewrite={!groupMode && !generating && m.turnId ? () => rewriteUser(m.turnId!) : undefined}
+            onRegenerate={!groupMode && !generating && m.turnId ? () => regenerateAssistant(m.turnId!) : undefined}
           />
         {/if}
       {/each}
@@ -754,28 +1068,30 @@
   {/if}
 
   <div class="composer glass">
-    <!-- 隐藏的图片选择器，由下方图片按钮触发 -->
-    <input
-      class="file-input"
-      type="file"
-      accept="image/*"
-      multiple
-      bind:this={fileInput}
-      onchange={onPickImages}
-    />
-    <button
-      class="icon-btn composer-img-btn"
-      onclick={openFilePicker}
-      disabled={service !== 'ready' || generating}
-      aria-label="发送图片"
-      title="发送图片"
-    >
+    {#if !groupMode}
+      <!-- 群聊模式不提供附图入口：群记录禁带 data URL 图片（spec C-03/R3）// [SSA-GROUP] -->
+      <input
+        class="file-input"
+        type="file"
+        accept="image/*"
+        multiple
+        bind:this={fileInput}
+        onchange={onPickImages}
+      />
+      <button
+        class="icon-btn composer-img-btn"
+        onclick={openFilePicker}
+        disabled={service !== 'ready' || generating}
+        aria-label="发送图片"
+        title="发送图片"
+      >
       <svg viewBox="0 0 24 24">
         <rect x="3" y="4" width="18" height="16" rx="2" />
         <circle cx="8.5" cy="9.5" r="1.6" />
         <path d="M4 17l5-5 4 4 3-3 4 4" />
       </svg>
-    </button>
+      </button>
+    {/if}
     <textarea
       class="composer-input"
       bind:value={draft}
@@ -836,6 +1152,74 @@
     font-weight: 700;
     font-size: 0.95rem;
     line-height: 1.3;
+  }
+
+  /* ── 群聊：顶栏标记 + 成员条 // [SSA-GROUP] ── */
+  .group-mark {
+    width: 38px;
+    height: 38px;
+    border-radius: var(--radius-lg);
+    display: grid;
+    place-items: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-secondary));
+    color: var(--on-accent);
+    font-weight: 800;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+  .who-sub {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+  .member-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--gap-sm);
+    padding: 8px var(--gap-md);
+    border-radius: var(--radius-xl);
+    overflow-x: auto;
+    flex-shrink: 0;
+  }
+  .member {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px 4px 4px;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--glass-border);
+    background: var(--glass-bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.74rem;
+    cursor: pointer;
+    flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .member.forced {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .member.muted {
+    opacity: 0.45;
+  }
+  .member-name {
+    max-width: 5.5em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .member-muted {
+    font-size: 0.62rem;
+    color: var(--danger);
+    border: 1px solid currentColor;
+    border-radius: var(--radius-pill);
+    padding: 0 4px;
+  }
+  .member-hint {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    flex-shrink: 0;
   }
 
   /* 当前对话名（点开切换列表）：低对比、带 chevron，明确是可点的 */

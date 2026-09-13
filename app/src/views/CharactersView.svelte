@@ -13,6 +13,7 @@
   import { onMount } from 'svelte';
   import Avatar from '../lib/Avatar.svelte';
   import { characters } from '../stores/characters.svelte';
+  import { groups } from '../stores/groups.svelte'; // [SSA-GROUP]
   import type { CharacterCard, CharacterInput, CharacterPreserve } from '../lib/backend';
   import { characterAvatarUrl, importCharacter, translateText } from '../lib/backend';
   import { pushBack } from '../lib/back';
@@ -183,7 +184,56 @@
   function pick(name: string) {
     const c = characters.list.find((x) => x.name === name) ?? null;
     characters.select(c);
+    // 单选角色 = 退出群模式（否则会残留上一次的群态，聊天页仍显示群）// [SSA-GROUP]
+    if (groups.enabled) groups.setActive(null);
     onOpenChat();
+  }
+
+  // ── 群聊：多选开聊 // [SSA-GROUP] ─────────────────────────────────────────
+  // 归属键统一用**角色头像文件名**（与 groups/network/背景 store 同一命名空间）。
+  let groupMode = $state(false);
+  let pickedKeys = $state<string[]>([]);
+
+  function toggleGroupMode() {
+    groupMode = !groupMode;
+    pickedKeys = [];
+  }
+
+  function togglePick(c: CharacterCard) {
+    if (!c.avatar) {
+      importHint = { ok: false, text: `「${c.name}」没有头像文件，无法作为群成员` };
+      return;
+    }
+    pickedKeys = pickedKeys.includes(c.avatar)
+      ? pickedKeys.filter((k) => k !== c.avatar)
+      : [...pickedKeys, c.avatar];
+  }
+
+  function cancelGroupMode() {
+    groupMode = false;
+    pickedKeys = [];
+  }
+
+  /** 进入已存在的群：设为当前群并回到聊天页。 */
+  function enterGroup(id: string) {
+    groups.setActive(id);
+    onOpenChat();
+  }
+
+  /** 用已选成员开聊：成员集合相同则复用已有群（避免重复建群）。 */
+  function startGroupChat() {
+    if (pickedKeys.length < 2) return;
+    const existed = groups.findByMembers(pickedKeys);
+    const id = existed ? existed.id : groups.create(pickedKeys.map((k) => nameOfKey(k) || k).join(' · '), pickedKeys);
+    groups.setActive(id);
+    groupMode = false;
+    pickedKeys = [];
+    onOpenChat();
+  }
+
+  /** 头像文件名 → 角色显示名（找不到时回落文件名）。 */
+  function nameOfKey(key: string): string | null {
+    return characters.list.find((c) => c.avatar === key)?.name ?? null;
   }
 
   function openCreate() {
@@ -284,6 +334,11 @@
   <header class="page-bar">
     <h1>角色</h1>
     <div class="bar-actions">
+      {#if groups.enabled}
+        <button class="btn btn-sm" class:on={groupMode} onclick={toggleGroupMode}>
+          {groupMode ? '退出多选' : '群聊'}
+        </button>
+      {/if}
       <button class="btn btn-sm" onclick={openImport} disabled={importing}>
         {importing ? '导入中…' : '导入角色卡'}
       </button>
@@ -326,38 +381,80 @@
       </div>
     </div>
   {:else}
+    {#if groups.enabled && groups.groups.length > 0}
+      <!-- 已有群聊：点进入（切换回聊天页），删除按钮在右侧。// [SSA-GROUP] -->
+      <section class="group-section">
+        <h2 class="group-title">群聊</h2>
+        <ul class="list">
+          {#each groups.groups as g (g.id)}
+            <li>
+              <div class="item glass">
+                <button class="pick" onclick={() => enterGroup(g.id)}>
+                  <span class="text">
+                    <span class="name">{g.name}</span>
+                    <span class="desc">{g.memberKeys.length} 位成员 · {groups.sessions.filter((s) => s.groupId === g.id).length} 条群聊</span>
+                  </span>
+                </button>
+                <div class="row-actions">
+                  <button class="mini danger" onclick={() => groups.remove(g.id)} aria-label="删除群聊">删除</button>
+                </div>
+              </div>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/if}
     <ul class="list">
       {#each characters.list as c (c.name)}
         <li>
-          <div class="item glass" class:selected={characters.active?.name === c.name}>
+          <div class="item glass" class:selected={!groupMode && characters.active?.name === c.name} class:picked={groupMode && !!c.avatar && pickedKeys.includes(c.avatar)}>
             <button
               class="pick"
-              onclick={() => pick(c.name)}
-              aria-pressed={characters.active?.name === c.name}
+              onclick={() => (groupMode ? togglePick(c) : pick(c.name))}
+              aria-pressed={groupMode ? !!c.avatar && pickedKeys.includes(c.avatar) : characters.active?.name === c.name}
             >
               <Avatar src={characterAvatarUrl(c.avatar)} name={c.name} size={42} />
               <span class="text">
                 <span class="name">{c.name}</span>
                 <span class="desc">{c.description || '暂无描述'}</span>
               </span>
-              {#if characters.active?.name === c.name}
+              {#if groupMode}
+                {#if c.avatar && pickedKeys.includes(c.avatar)}
+                  <span class="check" aria-hidden="true">✓</span>
+                {/if}
+              {:else if characters.active?.name === c.name}
                 <span class="check" aria-hidden="true">✓</span>
               {/if}
             </button>
-            <div class="row-actions">
-              <button class="mini" onclick={() => openEdit(c)} aria-label="编辑角色">编辑</button>
-              <button
-                class="mini danger"
-                onclick={() => removeOne(c.name)}
-                aria-label="删除角色"
-              >
-                删除
-              </button>
-            </div>
+            {#if !groupMode}
+              <div class="row-actions">
+                <button class="mini" onclick={() => openEdit(c)} aria-label="编辑角色">编辑</button>
+                <button
+                  class="mini danger"
+                  onclick={() => removeOne(c.name)}
+                  aria-label="删除角色"
+                >
+                  删除
+                </button>
+              </div>
+            {/if}
           </div>
         </li>
       {/each}
     </ul>
+
+    {#if groupMode}
+      <!-- 多选开聊的操作条（固定底部，避免滚长列表时找不到） // [SSA-GROUP] -->
+      <div class="group-bar glass">
+        <span class="gb-count">已选 {pickedKeys.length} 人{pickedKeys.length < 2 ? '（至少 2 人）' : ''}</span>
+        <div class="gb-actions">
+          <button class="btn btn-sm" onclick={cancelGroupMode}>取消</button>
+          <button class="btn btn-accent btn-sm" disabled={pickedKeys.length < 2} onclick={startGroupChat}>
+            开始群聊
+          </button>
+        </div>
+      </div>
+    {/if}
   {/if}
 </div>
 
@@ -601,8 +698,56 @@
     padding: 7px 12px;
     font-size: 0.76rem;
   }
+  .btn-sm.on {
+    background: var(--accent-soft);
+    border-color: var(--accent-border);
+    color: var(--accent);
+  }
   .file-input {
     display: none;
+  }
+
+  /* ── 群聊：已有群列表 + 多选操作条 // [SSA-GROUP] ── */
+  .group-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: var(--gap-md);
+  }
+  .group-title {
+    margin: 0 0 0 4px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .item.picked {
+    border-color: var(--accent-border);
+    background: var(--accent-soft);
+  }
+  .group-bar {
+    /* 必须 **fixed** 且抬到 tabbar 之上：此前用 `position: sticky; bottom: 0`
+       放在 `flex: 1` 的列表之后，会被列表挤出可视区（浏览器里仍有 boundingBox，
+       故 e2e 的 toBeVisible 假通过；真机上直接不可见/不可点）。 */
+    position: fixed;
+    left: var(--gap-md);
+    right: var(--gap-md);
+    bottom: calc(84px + var(--safe-bottom));
+    z-index: var(--z-nav);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--gap-sm);
+    padding: 10px var(--gap-md);
+    border-radius: var(--radius-xl);
+  }
+  .gb-count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  .gb-actions {
+    display: flex;
+    gap: var(--gap-sm);
+    flex-shrink: 0;
   }
 
   /* 翻译面板（表单内嵌，先预览再应用）*/

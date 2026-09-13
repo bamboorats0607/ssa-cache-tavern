@@ -18,6 +18,7 @@
  */
 
 import { logger } from '../lib/logger';
+import { isGroupChatEnabled, setGroupChatEnabled } from '../lib/group-flag'; // [SSA-GROUP]
 import {
   byGroupRecency,
   countGroupReplies,
@@ -105,6 +106,13 @@ function loadGroups(): GroupsFile {
 }
 
 class GroupsStore {
+  /**
+   * 群聊功能开关（**响应式镜像** localStorage 里的真实 flag）。
+   * 为什么要镜像：`isGroupChatEnabled()` 读 localStorage，是**非响应式**的；
+   * 视图要在用户切换开关后立刻显隐群入口，故这里存一份 `$state` 并由 `setEnabled()` 同步写两处。
+   */
+  enabled = $state(false);
+
   /** 群元数据（响应式） */
   groups = $state<Group[]>([]);
   /** 当前激活群 */
@@ -118,6 +126,7 @@ class GroupsStore {
   lastError = $state<string | null>(null);
 
   constructor() {
+    this.enabled = isGroupChatEnabled(); // [SSA-GROUP]
     const file = loadGroups();
     this.groups = file.groups;
     this.activeGroupId =
@@ -134,6 +143,21 @@ class GroupsStore {
   /** 当前激活群（无则 null）。 */
   get active(): Group | null {
     return this.groups.find((g) => g.id === this.activeGroupId) ?? null;
+  }
+
+  /** 开关群聊（同步写 localStorage 的真实 flag）。 */
+  setEnabled(on: boolean): void {
+    setGroupChatEnabled(on); // [SSA-GROUP]
+    this.enabled = on;
+    if (!on) this.activeGroupId = null; // 关闭时退出群模式，避免残留群态影响单角色路径
+  }
+
+  /** 按成员集合找群（顺序无关；用于「选这几个角色开聊」复用已有群）。 */
+  findByMembers(memberKeys: string[]): Group | null {
+    const want = [...new Set(memberKeys)].sort().join('|');
+    return (
+      this.groups.find((g) => [...new Set(g.memberKeys)].sort().join('|') === want) ?? null
+    );
   }
 
   /** 群名（UI 展示用）。 */

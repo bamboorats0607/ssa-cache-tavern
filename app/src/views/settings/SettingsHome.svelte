@@ -12,6 +12,7 @@
   import { modelConfig } from '../../stores/model.svelte';
   import { advanced } from '../../stores/advanced.svelte';
   import { sessions } from '../../stores/sessions.svelte';
+  import { groups } from '../../stores/groups.svelte'; // [SSA-GROUP]
 
   interface Props {
     /** 进入子页 */
@@ -126,6 +127,22 @@
   <SettingGroup>
     <SettingRow label="正则" onclick={() => onNavigate('regex')} />
     <SettingRow label="插件" value="0 个" onclick={() => onNavigate('plugins')} />
+  </SettingGroup>
+
+  <!-- 群聊（实验）：flag 默认关；开启后「角色」页出现多选开聊入口 // [SSA-GROUP] -->
+  <SettingGroup title="群聊（实验）">
+    <SettingRow
+      kind="toggle"
+      label="启用群聊"
+      desc="在「角色」页多选成员即可开聊；记录存本机独立存储，不影响单角色会话"
+      checked={groups.enabled}
+      onchange={(v) => groups.setEnabled(v)}
+    />
+    <SettingRow
+      label="发言人规则"
+      value="本地状态机"
+      desc="按角色网络与触发矩阵选择发言者，不额外调用模型"
+    />
   </SettingGroup>
 
   <SettingGroup>
