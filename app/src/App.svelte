@@ -12,10 +12,11 @@
   import SettingsView from './views/SettingsView.svelte';
   import DebugView from './views/DebugView.svelte';
   import EmptyView from './views/EmptyView.svelte';
-  import { isDebugEnabled } from './lib/logger';
+  import { isDebugEnabled, logger } from './lib/logger';
   import { pushBack } from './lib/back';
   import { characters } from './stores/characters.svelte';
-  import { characterAvatarUrl } from './lib/backend';
+  import { background } from './stores/background.svelte';
+  import { characterAvatarUrl, characterBackgroundUrl } from './lib/backend';
 
   type Tab = 'chat' | 'characters' | 'worldbook' | 'settings' | 'debug';
 
@@ -83,17 +84,63 @@
   });
 
   /**
-   * 背景立绘：默认取当前角色的头像全图铺开（用户原话「头像全图默认作为背景」）。
-   * artType 对齐上游 backgrounds 契约的 `mediaType: 'video' | 'image'`，
-   * 后续接视频背景时只需改这里传的值，消费侧不必再动结构。本次只会是 image。
+   * 背景：默认取当前角色的头像全图铺开（用户原话「头像全图默认作为背景」）；
+   * 用户可在「外观」页改为自定义图片 / 短视频（见 background store）。
+   *
+   * 解析顺序（每层都可能为空）：
+   *   自定义媒体（未被判定失败）→ 角色头像 → 不渲染
+   * 自定义媒体**加载失败**时回落到头像（用户明确要求）；失败标记是瞬时的，
+   * 切换媒体 / 角色后自动复位，不改动用户设置。
    */
-  const bgArtUrl = $derived(characterAvatarUrl(characters.fallback?.avatar));
+  const avatarArtUrl = $derived(characterAvatarUrl(characters.fallback?.avatar));
+  const customArtUrl = $derived(
+    background.state.mode === 'custom' && background.state.file
+      ? characterBackgroundUrl(background.state.file)
+      : null,
+  );
+
+  let customFailed = $state(false);
+  let avatarFailed = $state(false);
+
+  // 更换自定义媒体 / 角色头像时复位失败标记（仅读对应 URL，不读失败标记本身，无回环）
+  $effect(() => {
+    void customArtUrl;
+    customFailed = false;
+    background.markDegraded(false);
+  });
+  $effect(() => {
+    void avatarArtUrl;
+    avatarFailed = false;
+  });
+
+  const usingCustom = $derived(!!customArtUrl && !customFailed);
+  const bgArtUrl = $derived(usingCustom ? customArtUrl : avatarFailed ? null : avatarArtUrl);
+  // 自定义媒体类型对齐上游 backgrounds 契约的 `mediaType: 'video' | 'image'`；默认头像恒为图片
+  const bgType = $derived(usingCustom ? background.state.mediaType : ('image' as const));
+  // 自定义媒体整幅铺满（气泡不让位）；默认头像沿用 2:3 让位策略
+  const bgFit = $derived<'auto' | 'cover'>(usingCustom ? 'cover' : 'auto');
+
+  function onBgMediaError() {
+    if (usingCustom) {
+      customFailed = true;
+      background.markDegraded(true);
+      logger.warn('background', '自定义背景加载失败，已回落到角色头像');
+    } else {
+      avatarFailed = true;
+    }
+  }
 </script>
 
-<!-- 背景层：极简渐变 + 角色立绘位（见 BackgroundShader 注释） -->
-<BackgroundShader art={bgArtUrl} />
+<!-- 背景层：极简渐变 + 媒体位（角色头像 / 自定义图片 / 自定义短视频） -->
+<BackgroundShader
+  art={bgArtUrl}
+  type={bgType}
+  fit={bgFit}
+  dim={background.state.dim}
+  onerror={onBgMediaError}
+/>
 
-<div class="shell">
+<div class="shell" class:bg-cover={usingCustom}>
   <div class="app-body">
     <!-- 左侧栏（桌面） -->
     <nav class="sidebar glass" aria-label="主导航">
@@ -169,6 +216,12 @@
     display: flex;
     flex-direction: column;
     z-index: var(--z-content);
+  }
+
+  /* 自定义背景整幅铺满 → 气泡无需再给立绘让位。
+     横屏的 max-width 是「减 --art-w」（见 ChatView.svelte），故这里必须归零才是满宽。 */
+  .shell.bg-cover {
+    --art-w: 0px;
   }
 
   .secret-tap {

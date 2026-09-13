@@ -54,3 +54,6 @@ app/dist/
 *.jks
 *.keystore
 keystore.properties
+
+# 安全扫描插件的本地产物（钩子状态，非项目内容）
+.mimosa/

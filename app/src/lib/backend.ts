@@ -124,6 +124,58 @@ export function characterBackgroundUrl(file?: string | null): string | null {
   return mediaUrl(`backgrounds/${file.replace(/^\/+/, '')}`);
 }
 
+export interface BackgroundUploadResult {
+  ok: boolean;
+  /** 后端落盘后的文件名（存 localStorage 用），成功时才有 */
+  filename?: string;
+  error?: string;
+}
+
+/**
+ * 上传用户自定义背景（图片或短视频）。
+ *
+ * 契约：`POST /api/backgrounds/upload`（server-ref/src/endpoints/backgrounds.js:141），
+ * 成功时**响应体是纯文本文件名**（`response.send(filename)`），不是 JSON。
+ * 上游用全局 multer 单文件中间件，字段名固定为 `avatar`
+ * （server-ref/src/server-main.js:454 `.single('avatar')`）—— 别改成别的字段名。
+ *
+ * 与角色卡写出一致：不抛异常炸 UI，统一返回可判定结果。
+ */
+export async function uploadBackground(
+  file: File,
+  base = getBaseUrl(),
+): Promise<BackgroundUploadResult> {
+  try {
+    const token = await getCsrfToken();
+    const fd = new FormData();
+    fd.append('avatar', file);
+    const res = await fetch(`${base}/api/backgrounds/upload`, {
+      method: 'POST',
+      headers: { ...(token ? { 'X-CSRF-Token': token } : {}) },
+      body: fd,
+      // 视频可能较大，给足超时（本地环回，通常秒级）
+      signal: AbortSignal.timeout(60000),
+    });
+    if (!res.ok) {
+      logger.warn('backend', '背景上传未成功', { status: res.status });
+      const error =
+        res.status === 404 || res.status === 405
+          ? '当前后端不支持背景上传（可能是精简后端）'
+          : res.status === 401 || res.status === 403
+            ? '无权限上传（安全令牌失效）'
+            : `上传失败（${res.status}）`;
+      return { ok: false, error };
+    }
+    const filename = (await res.text()).trim();
+    if (!filename) return { ok: false, error: '后端未返回文件名' };
+    logger.info('backend', '背景上传完成', { filename });
+    return { ok: true, filename };
+  } catch (e) {
+    logger.warn('backend', '背景上传异常', e);
+    return { ok: false, error: '网络异常，未能连接到后端' };
+  }
+}
+
 /**
  * 探测后端。内部重试若干次（App 冷启动时内嵌 Node 需要时间就绪）。
  * 返回对用户友好的状态 + 内部信息（后者只入日志）。
