@@ -58,6 +58,29 @@ export interface BuildContextInput {
   rng?: () => number;
   /** 扫描深度：参与关键词匹配的最近消息条数 */
   scanDepth?: number;
+  /**
+   * 群聊上下文（**仅群聊传入**；不传 = 单角色路径，输出逐字节不变，见 spec R2/C-06）。// [SSA-GROUP]
+   *
+   * 传入时的块序（spec §4 Phase 1，不可调整）：
+   *   `群常量头(冻结) → 世界书前缀(冻结) → 发言人卡(可变) → history → 尾缀`
+   * 不传时的块序（既有单角色，保持不变）：
+   *   `角色块 → 世界书前缀 → history → 尾缀`
+   *
+   * 注意两条硬约束：
+   *  · `memberNames` **只放成员姓名名单**（禁止 description/personality/scenario/mes_example）—— R1/C-05
+   *  · 关系矩阵 / 优先级 / 触发位**一律不得进入本结构**（spec R14）——它们只影响「谁说话」
+   */
+  group?: GroupContext;
+}
+
+/** 群聊组装所需的最小上下文（不含任何规则数据）。 */
+export interface GroupContext {
+  /** 全部成员显示名（群常量头用；顺序无关，内部会去重排序以保证字节稳定） */
+  memberNames: string[];
+  /** 本轮发言人显示名 */
+  speakerName: string;
+  /** 本轮发言人设定（可空；空则该块不注入，与单角色同规则） */
+  speakerDescription?: string;
 }
 
 export interface BuildContextOutput {
@@ -82,6 +105,7 @@ export function buildContext(input: BuildContextInput): BuildContextOutput {
     factState,
     rng,
     scanDepth = 6,
+    group,
   } = input;
 
   // 扫描文本：最近 N 条（对齐 ST 的 world_info_depth 语义）
@@ -100,10 +124,15 @@ export function buildContext(input: BuildContextInput): BuildContextOutput {
   });
 
   const turns: ChatTurn[] = [];
-
-  // 1) 角色设定（恒定，进最前面的 system）
   const desc = charDescription?.trim();
-  if (desc) {
+
+  // 1) 首块：单角色 = 角色设定；群聊 = 群常量头（成员姓名名单，不含任何人设长文本）
+  //    —— 这是两条路径**唯一**的块位差异；群聊多出的「发言人卡」在第 2.5 步插入。
+  if (group) {
+    // [SSA-GROUP]
+    const head = renderGroupHead(group.memberNames);
+    if (head) turns.push({ role: 'system', content: head });
+  } else if (desc) {
     turns.push({
       role: 'system',
       content: `你正在扮演「${charName}」。角色设定：${desc}\n请始终保持这个角色的语气与性格进行对话。`,
@@ -116,6 +145,14 @@ export function buildContext(input: BuildContextInput): BuildContextOutput {
       role: 'system',
       content: `【世界设定·恒定】\n${r.layers.prefix.join('\n')}`,
     });
+  }
+
+  // 2.5) 群聊专属：发言人卡（**可变区**，放在冻结区之后、history 之前）
+  //      形状与单角色角色块逐字同构，保证「模型眼中的发言人」与单角色一致。
+  if (group) {
+    // [SSA-GROUP]
+    const card = renderSpeakerCard(group.speakerName, group.speakerDescription);
+    if (card) turns.push({ role: 'system', content: card });
   }
 
   // 3) 对话历史
@@ -162,6 +199,34 @@ export function buildContext(input: BuildContextInput): BuildContextOutput {
     },
   };
 }
+
+/**
+ * 群常量头：告诉模型「你在一个群里、都有谁」。
+ *
+ * **功能必需而非缓存优化**：若只把当前发言人当 `charName` 传入，模型不知道自己在群里、
+ * 也不知道还有谁在场 —— 那不是群聊，只是「轮流单聊」。
+ *
+ * 两条约束（违反即返工）：
+ *  · **只含成员姓名名单**，禁止任何 `description/personality/scenario/mes_example`（R1/C-05）；
+ *  · 去重 + 排序后输出 → **成员集合不变时字节恒定**（C-07），与成员顺序无关。
+ * 群名**刻意不入此块**：改名不应击穿冻结。
+ */
+export function renderGroupHead(memberNames: string[]): string {
+  const names = [...new Set(memberNames.map((n) => n.trim()).filter(Boolean))].sort();
+  if (names.length === 0) return '';
+  return (
+    `【群聊】你在一个有多名角色的群聊中，在场的有：${names.join('、')}。\n` +
+    '你可以自然接话，也可以把话让给别人；不必每轮都发言。'
+  );
+}
+
+/** 发言人卡：与单角色的角色块**同构**（仅当前发言人）。 */
+export function renderSpeakerCard(speakerName: string, speakerDescription?: string): string {
+  const desc = speakerDescription?.trim();
+  if (!desc) return '';
+  return `你正在扮演「${speakerName}」。角色设定：${desc}\n请始终保持这个角色的语气与性格进行对话。`;
+}
+
 
 /**
  * 把 API 实测用量合并进统计（覆盖本地估算）。
