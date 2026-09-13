@@ -19,6 +19,7 @@
   import PersonaPage from './settings/PersonaPage.svelte';
   import ChatSettingsPage from './settings/ChatSettingsPage.svelte';
   import UsagePage from './settings/UsagePage.svelte';
+  import LearningPage from './settings/LearningPage.svelte'; // [SSA-LEARN]
   import PlaceholderPage from '../lib/settings/PlaceholderPage.svelte';
   import { pushBack } from '../lib/back';
 
@@ -36,6 +37,7 @@
     | 'persona'
     | 'chat'
     | 'usage'
+    | 'learning'
     | 'preset'
     | 'characters'
     | 'regex'
@@ -90,6 +92,8 @@
   <ChatSettingsPage onBack={back} />
 {:else if page === 'usage'}
   <UsagePage onBack={back} />
+{:else if page === 'learning'}
+  <LearningPage onBack={back} />
 {:else if page === 'preset'}
   <PlaceholderPage
     title="预设"

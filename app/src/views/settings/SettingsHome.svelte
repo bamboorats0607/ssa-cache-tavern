@@ -13,6 +13,7 @@
   import { advanced } from '../../stores/advanced.svelte';
   import { sessions } from '../../stores/sessions.svelte';
   import { groups } from '../../stores/groups.svelte'; // [SSA-GROUP]
+  import { learningGate } from '../../lib/learning/suggest-gate.svelte'; // [SSA-LEARN]
 
   interface Props {
     /** 进入子页 */
@@ -143,6 +144,27 @@
       value="本地状态机"
       desc="按角色网络与触发矩阵选择发言者，不额外调用模型"
     />
+  </SettingGroup>
+
+  <!-- 学习（实验）：flag 默认关；开启后出现「学习建议」入口 // [SSA-LEARN] -->
+  <SettingGroup title="学习（实验）">
+    <SettingRow
+      kind="toggle"
+      label="启用学习"
+      desc="从本机单角色对话里归纳场景词与句式模板，供你逐条确认；采纳才写入"
+      checked={learningGate.enabled}
+      onchange={(v) => learningGate.setEnabled(v)}
+    />
+    {#if learningGate.enabled}
+      <SettingRow
+        label="学习建议"
+        desc="逐条采纳 / 编辑 / 拒绝；采纳后写进选定的世界书，可撤销"
+        value={learningGate.tally.applied + learningGate.tally.edited > 0
+          ? `已采纳 ${learningGate.tally.applied + learningGate.tally.edited} 条`
+          : '未采纳'}
+        onclick={() => onNavigate('learning')}
+      />
+    {/if}
   </SettingGroup>
 
   <SettingGroup>
