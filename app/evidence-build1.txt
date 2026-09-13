@@ -1,0 +1,51 @@
+﻿hash-dist: dist  (7 files)
+  881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c     13057  assets/hero-CLDdwZDr.png
+  a858ca4d41e7558634e3af481b9fd18fef76e8628adad9414f236b1a9d5ee742      4131  assets/index-CgA-1d2U.css
+  594268abb7bb60c830352025197ad3efb28d64f3f4dbbb8e3d02e382726d1777     30689  assets/index-KAE8l9dQ.js
+  5be21acd42eb7b896e517f4e0f0f11eb5c5d9e54fbbcebe9453f033008fcca6f      8709  assets/vite-BF8QNONU.svg
+  61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66      9522  favicon.svg
+  b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a      5031  icons.svg
+  1c9a3729e005e1e0c3aec76560c4cc1e8663b79a7877de80125c16b14be4bae3       452  index.html
+TOTAL_SHA256: a2363a00e5b99b6ddeea27ba54baa295d43dfd8f9ce75d554d6b5349607d9b08
+###JSON###
+{
+  "dir": "dist",
+  "total": "a2363a00e5b99b6ddeea27ba54baa295d43dfd8f9ce75d554d6b5349607d9b08",
+  "entries": [
+    {
+      "file": "assets/hero-CLDdwZDr.png",
+      "sha256": "881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c",
+      "bytes": 13057
+    },
+    {
+      "file": "assets/index-CgA-1d2U.css",
+      "sha256": "a858ca4d41e7558634e3af481b9fd18fef76e8628adad9414f236b1a9d5ee742",
+      "bytes": 4131
+    },
+    {
+      "file": "assets/index-KAE8l9dQ.js",
+      "sha256": "594268abb7bb60c830352025197ad3efb28d64f3f4dbbb8e3d02e382726d1777",
+      "bytes": 30689
+    },
+    {
+      "file": "assets/vite-BF8QNONU.svg",
+      "sha256": "5be21acd42eb7b896e517f4e0f0f11eb5c5d9e54fbbcebe9453f033008fcca6f",
+      "bytes": 8709
+    },
+    {
+      "file": "favicon.svg",
+      "sha256": "61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66",
+      "bytes": 9522
+    },
+    {
+      "file": "icons.svg",
+      "sha256": "b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a",
+      "bytes": 5031
+    },
+    {
+      "file": "index.html",
+      "sha256": "1c9a3729e005e1e0c3aec76560c4cc1e8663b79a7877de80125c16b14be4bae3",
+      "bytes": 452
+    }
+  ]
+}

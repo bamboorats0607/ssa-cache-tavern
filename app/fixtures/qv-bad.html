@@ -1,0 +1,11 @@
+<!-- fixtures/qv-bad.html — 坏例：给 script.js 拼了 ?v=，lint 必须 fail -->
+<!doctype html>
+<html>
+  <head>
+    <link rel="modulepreload" href="script.js?v=20260803a" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="script.js?v=20260803a"></script>
+  </body>
+</html>

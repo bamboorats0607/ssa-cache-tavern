@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  B2 解法：Android 9+ 默认阻断明文 HTTP（cleartext）。
+  形态 (b) 下用户需自行填写「本地/局域网后端地址」（形如 http://192.168.x.x:4444），
+  由于地址由用户在运行时填写、无法提前枚举域名，故采用 base-config 放行明文 HTTP。
+
+  安全边界（明确记录，非"全局放开"）：
+  - 仅放行 cleartext，不放行用户证书、不降低 TLS 校验强度。
+  - trust-anchors 保持 system 默认，不做 MITM 放行。
+  - 生产上架前若要求更严，可按用户实际后端域名改为 domain-config 白名单（见下方注释模板）。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+      收紧模板（若后端地址固定，改用以下 domain-config 并删除上面的 base-config）：
+      <domain-config cleartextTrafficPermitted="true">
+          <domain includeSubdomains="false">192.168.1.100</domain>
+      </domain-config>
+    -->
+</network-security-config>

@@ -1,0 +1,138 @@
+apply plugin: 'com.android.application'
+
+/**
+ * 发布签名配置。
+ *
+ * 凭据放在 `android/keystore.properties`（**不入库**，见 android/.gitignore）。
+ * 文件缺失时优雅降级：release 仍可构建（产出未签名包），便于 CI / 他人复现，
+ * 而不是直接构建失败。
+ */
+def keystorePropsFile = rootProject.file('keystore.properties')
+def keystoreProps = new Properties()
+if (keystorePropsFile.exists()) {
+    keystorePropsFile.withInputStream { keystoreProps.load(it) }
+}
+def hasSigning = keystoreProps.containsKey('storeFile')
+    && rootProject.file(keystoreProps['storeFile']).exists()
+
+android {
+    namespace = "dev.tavern.shell"
+    compileSdk = rootProject.ext.compileSdkVersion
+    ndkVersion "27.3.13750724"
+    defaultConfig {
+        applicationId "dev.tavern.shell"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+        // S5 内嵌后端：libnode.so 各 ABI。
+        //
+        // 注意：此处**刻意不设** ndk.abiFilters，改由各 buildType 分别声明。
+        // 原因：AGP 中 `ndk.abiFilters` 与 `splits.abi` **互斥**，同时设置会直接
+        // 构建失败（实测报错 "Conflicting configuration ... in ndk abiFilters
+        // cannot be present when splits abi filters are set"）。
+        // 本工程选用 ndk.abiFilters 方案（见 buildTypes），因它能按变体精细控制，
+        // 比 splits 更适合「debug 要模拟器 ABI、release 只要真机 ABI」的需求。
+        externalNativeBuild {
+            cmake {
+                cppFlags ''
+                // libnode.so 依赖 libc++_shared.so（实测真机报 UnsatisfiedLinkError），
+                // 必须把 libc++ 以共享库形式打进 APK。
+                arguments '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path 'CMakeLists.txt'
+        }
+    }
+    signingConfigs {
+        release {
+            if (hasSigning) {
+                // 注意：storeFile 用 rootProject.file 解析。
+                // keystore.properties 位于 android/（rootProject）下，而 build.gradle
+                // 在 android/app/ —— 用 `file()` 会相对 app 模块解析，导致找不到密钥、
+                // 静默产出未签名包（实测踩过：产物名为 app-release-unsigned.apk）。
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+    buildTypes {
+        debug {
+            // debug 保留模拟器 ABI，便于本地两处验证
+            ndk {
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
+        }
+        release {
+            // ── 发布裁剪（本次核心）──────────────────────────────────────────
+            // 1) ABI 裁剪：只留 arm64-v8a。
+            //    实测 libnode.so 单 ABI 就 80MB 左右（arm64 83.4 / x86_64 81.9 /
+            //    armeabi 75.8，合计 241MB），是 APK 体积的绝对大头。
+            //    去掉模拟器专用的 x86_64 可省下约 80MB。
+            ndk {
+                abiFilters(*rootProject.ext.releaseAbis.split(','))
+            }
+            // 2) R8 代码压缩：删除不可达代码 + 混淆 + 优化
+            minifyEnabled true
+            // 3) 资源压缩：剔除未被引用的 res 资源（需与 minify 同时开启）
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                          'proguard-rules.pro'
+            // 4) 关闭调试信息（debuggable 默认即 false，此处显式声明意图）
+            debuggable false
+            if (hasSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+    }
+    // 打包排除：这些文件只在开发期有用，不进发布包
+    packaging {
+        jniLibs {
+            // 默认即排除调试符号；显式声明以防回归
+            useLegacyPackaging = false
+        }
+        resources {
+            excludes += ['META-INF/*.version', 'META-INF/*.kotlin_module', 'DebugProbesKt.bin']
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

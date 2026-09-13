@@ -1,0 +1,56 @@
+# tavern 构建产物
+node_modules/
+dist/
+build/
+.gradle/
+local.properties
+*.log
+
+# Android 内嵌后端资产（由 npm run prepare:backend 从上游装配，
+# 体积约 400MB，不入版本库）。
+# 注意：nodejs-project 下手写的 main.js / config.yaml 必须保留，
+# 因此这里按条目排除，不用整目录排除。
+android/app/src/main/assets/nodejs-project/server.js
+android/app/src/main/assets/nodejs-project/src/
+android/app/src/main/assets/nodejs-project/public/
+android/app/src/main/assets/nodejs-project/default/
+android/app/src/main/assets/nodejs-project/node_modules/
+android/app/src/main/assets/nodejs-project/webpack.config.js
+android/app/src/main/assets/nodejs-project/package-lock.json
+android/app/src/main/assets/nodejs-project/bun.lock
+
+# Capacitor 同步产物（由 cap sync 生成）
+android/app/src/main/assets/public/
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+
+# APK 产物
+*.apk
+*.aab
+
+# ============================================================
+# 公开仓库排除项（第三方代码 / 二进制 / 一次性产物）
+# ============================================================
+
+# 上游 SillyBunny 完整副本（AGPL-3.0 第三方源码，非本项目代码）
+server-ref/
+
+# 预编译 Node 运行时（第三方二进制，单文件约 80MB，超出 GitHub 单文件上限）。
+# 复现构建时需自行获取 nodejs-mobile 预编译包，见 README。
+android/app/libnode/
+
+# 探索性 spike 产物（一次性实验，含大量截图与 dump）
+spikes/
+
+# 构建 / ABI 比对产物
+.tmp-apkcmp/
+apk/
+
+# 前端测试产物
+app/test-results/
+app/dist/
+
+# 签名密钥与凭据（绝不入库：泄露即可被冒名发布）
+*.jks
+*.keystore
+keystore.properties

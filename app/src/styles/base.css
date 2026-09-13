@@ -1,0 +1,307 @@
+/* ============================================================================
+   全局基础样式 + 玻璃拟态工具类
+   参考：opentavern index.html 的 .glass / .msg-bubble / 滚动条 / 动效
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  /* 浅色主题：告知浏览器表单控件 / 滚动条用浅色渲染 */
+  color-scheme: light;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-root);
+  color: var(--text);
+  /* font-scale 由「外观 → 界面字号」写入根元素，全局等比缩放 */
+  font-size: calc(0.925rem * var(--font-scale));
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  height: var(--app-height);
+  min-height: var(--app-height);
+  overscroll-behavior: none;
+}
+
+#app {
+  height: var(--app-height);
+  position: relative;
+  isolation: isolate;
+}
+
+/* --- 滚动条：细、低对比 --- */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: var(--radius-pill);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-hover);
+}
+
+/* --- 玻璃卡片 ---
+   依据（玻璃拟态四项要素）：半透明底 + backdrop blur + 细亮边框 + 柔和投影。
+   补充 saturate()：让被模糊的背景色更饱满，玻璃的通透感明显增强。
+
+   注意：**不要手写 -webkit- 前缀**。构建期 LightningCSS 会做前缀归一，
+   若同时写标准属性与 -webkit- 前缀，它会把两条合并成一条并只保留后者，
+   导致 Chrome 上标准属性丢失、blur 完全不生效（实测踩过此坑）。
+   LightningCSS 会依据 browserslist 自动补齐所需前缀。 */
+.glass {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--blur-intensity)) saturate(1.5);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow), var(--glass-inner-highlight);
+}
+.glass-hover:hover {
+  background: var(--glass-bg-hover);
+  border-color: var(--glass-border-hover);
+}
+.glass-active {
+  background: var(--glass-bg-active);
+  border-color: var(--neutral-3);
+}
+
+/* 不支持的浏览器回退为高不透明底，保证可读性 */
+@supports not (backdrop-filter: blur(1px)) {
+  .glass {
+    background: rgba(255, 255, 255, 0.92);
+  }
+}
+
+/* --- 按钮 --- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gap-sm);
+  padding: 8px 16px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--glass-border);
+  background: var(--neutral-1);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-standard);
+  -webkit-tap-highlight-color: transparent;
+}
+.btn:hover {
+  background: var(--neutral-2);
+  border-color: var(--glass-border-hover);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn-accent {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+.btn-accent:hover {
+  background: var(--accent-soft);
+}
+
+/* --- 图标按钮 --- */
+.icon-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--neutral-1);
+  border: 1px solid var(--glass-border);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all var(--dur-fast) var(--ease-standard);
+  -webkit-tap-highlight-color: transparent;
+}
+.icon-btn:hover {
+  background: var(--neutral-3);
+  color: var(--text);
+}
+.icon-btn:active {
+  transform: scale(0.94);
+}
+
+/* --- 表单 --- */
+.input,
+.textarea,
+.select {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--glass-border);
+  background: var(--input-bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.875rem;
+  outline: none;
+  transition: border-color var(--dur-fast) var(--ease-standard);
+}
+.input:focus,
+.textarea:focus,
+.select:focus {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.textarea {
+  resize: vertical;
+  min-height: 80px;
+  line-height: 1.6;
+}
+
+.label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--gap-xs);
+}
+
+/* 滑块 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--neutral-3);
+  border-radius: 2px;
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 0 0 4px var(--accent-glow);
+}
+
+/* --- 消息气泡（用户右侧用主题强调色、角色左侧用主题次级色） --- */
+.msg-bubble {
+  padding: 14px 18px;
+  line-height: 1.7;
+  font-size: 0.925rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  backdrop-filter: blur(10px);
+}
+.msg-user .msg-bubble {
+  background: var(--bubble-user-bg);
+  border: 1px solid var(--bubble-user-border);
+  border-radius: var(--bubble-radius) var(--bubble-radius) var(--bubble-tail)
+    var(--bubble-radius);
+}
+.msg-assistant .msg-bubble {
+  background: var(--bubble-assistant-bg);
+  border: 1px solid var(--bubble-assistant-border);
+  border-radius: var(--bubble-radius) var(--bubble-radius) var(--bubble-radius)
+    var(--bubble-tail);
+}
+.dialogue-highlight {
+  color: var(--accent);
+}
+
+/* --- 标签 --- */
+.tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
+  background: var(--neutral-1);
+  border: 1px solid var(--neutral-2);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* --- 动效 --- */
+@keyframes fadeIn {
+  0% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes slideUp {
+  0% {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes pulseDot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.animate-fade-in {
+  animation: fadeIn var(--dur-base) ease-out;
+}
+.animate-slide-up {
+  animation: slideUp var(--dur-slow) var(--ease-standard);
+}
+.typing-cursor::after {
+  content: "|";
+  animation: pulseDot 0.8s ease-in-out infinite;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* --- 无障碍：尊重系统「减少动态效果」 --- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --- 文本工具 --- */
+.text-muted {
+  color: var(--text-muted);
+}
+.text-dim {
+  color: var(--text-dim);
+}
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

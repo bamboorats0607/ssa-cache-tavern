@@ -1,0 +1,290 @@
+/* ============================================================================
+   Tavern 主题系统 v2 —— 浅色为主（Light-first）
+
+   ── 设计依据 ──────────────────────────────────────────────────────────────
+   1. 色源：D:\ui设计资源库 的 6 组互补色（设计芸卷 · Color Aesthetics）
+      —— 全部为「浅色渐变 + 单一饱和强调色」的明亮风格，而非深色。
+      例：沧溟蓝 #0E61AC + 玉柚杏 #FAF2E0 → 奶油底 + 蓝强调。
+   2. 结构：采用 shadcn/ui 的语义 token 约定（background / card / primary /
+      muted / border / ring），语义命名而非外观命名。
+   3. 玻璃：玻璃拟态成立的前提是「背后有内容可模糊」。因此每个主题都提供
+      彩色渐变 + 色斑背景（--bg-blob-*），玻璃面板才有可见的磨砂效果。
+
+   ── 为什么变量名不叫 background / primary ────────────────────────────────
+   组件层已统一消费 --text / --accent / --glass-* 等既有变量（57 处引用）。
+   此处保留这些名字但重定义为语义等价的浅色取值，避免大规模改名带来的回归
+   风险；新增 --on-accent 等语义别名承接对比度场景。
+   ========================================================================== */
+
+/* ----------------------------------------------------------------------------
+   主题 1：沧溟 (cangming)
+   色源：沧溟蓝 #0E61AC + 玉柚杏 #FAF2E0
+   气质：奶油纸感 + 深蓝，沉稳而不压抑
+   -------------------------------------------------------------------------- */
+:root,
+[data-theme='cangming'] {
+  --bg-root: #faf2e0;
+  --bg-blob-1: #0e61ac;
+  --bg-blob-2: #f3d9a4;
+  --bg-blob-3: #bcd6ec;
+
+  --accent: #0e61ac;
+  --accent-secondary: #d9a441;
+  --accent-glow: rgba(14, 97, 172, 0.18);
+  --accent-soft: rgba(14, 97, 172, 0.1);
+  --accent-border: rgba(14, 97, 172, 0.22);
+  --on-accent: #ffffff;
+
+  --text: #16324a;
+  --text-muted: #4a6580;
+  --text-dim: #78909f;
+  --text-faint: #a9bbc9;
+}
+
+/* ----------------------------------------------------------------------------
+   主题 2：岫烟 (xiuyan)
+   色源：岫烟青 #00B7C7 + 霜纨白 #FCF9E8
+   气质：清透青绿，冷调水感
+   -------------------------------------------------------------------------- */
+[data-theme='xiuyan'] {
+  --bg-root: #fcf9e8;
+  --bg-blob-1: #00b7c7;
+  --bg-blob-2: #a8e6e2;
+  --bg-blob-3: #e8f4d8;
+
+  --accent: #00909e;
+  --accent-secondary: #00b7c7;
+  --accent-glow: rgba(0, 144, 158, 0.18);
+  --accent-soft: rgba(0, 144, 158, 0.1);
+  --accent-border: rgba(0, 144, 158, 0.22);
+  --on-accent: #ffffff;
+
+  --text: #1b3a3d;
+  --text-muted: #48706f;
+  --text-dim: #6f9493;
+  --text-faint: #a6c2c0;
+}
+
+/* ----------------------------------------------------------------------------
+   主题 3：晴川 (qingchuan)
+   色源：晴川蓝 #79BEDF + 缃云黄 #F4DC84
+   气质：晴空暖阳，明快通透
+   -------------------------------------------------------------------------- */
+[data-theme='qingchuan'] {
+  --bg-root: #f7f4e4;
+  --bg-blob-1: #79bedf;
+  --bg-blob-2: #f4dc84;
+  --bg-blob-3: #cfe7f2;
+
+  --accent: #2e86ab;
+  --accent-secondary: #e0b83f;
+  --accent-glow: rgba(46, 134, 171, 0.18);
+  --accent-soft: rgba(46, 134, 171, 0.1);
+  --accent-border: rgba(46, 134, 171, 0.22);
+  --on-accent: #ffffff;
+
+  --text: #1f3b4d;
+  --text-muted: #527085;
+  --text-dim: #7e99a9;
+  --text-faint: #b0c4cf;
+}
+
+/* ----------------------------------------------------------------------------
+   主题 4：玫瑰 (meigui)
+   色源：玫瑰粉 #D87888 + 月白色 #E8F0F2
+   气质：柔粉月白，亲和温暖
+   -------------------------------------------------------------------------- */
+[data-theme='meigui'] {
+  --bg-root: #fdf3f5;
+  --bg-blob-1: #d87888;
+  --bg-blob-2: #f5c9d0;
+  --bg-blob-3: #e8f0f2;
+
+  --accent: #c25a6b;
+  --accent-secondary: #d87888;
+  --accent-glow: rgba(194, 90, 107, 0.18);
+  --accent-soft: rgba(194, 90, 107, 0.1);
+  --accent-border: rgba(194, 90, 107, 0.22);
+  --on-accent: #ffffff;
+
+  --text: #4a2630;
+  --text-muted: #7d525d;
+  --text-dim: #a67c86;
+  --text-faint: #c9aab1;
+}
+
+/* ----------------------------------------------------------------------------
+   主题 5：青岚 (qinglan)
+   色源：青岚色 #73AE52 + 云腴色 #FBF1D7
+   气质：山野青绿，自然舒展
+   -------------------------------------------------------------------------- */
+[data-theme='qinglan'] {
+  --bg-root: #fbf1d7;
+  --bg-blob-1: #73ae52;
+  --bg-blob-2: #d9e8b8;
+  --bg-blob-3: #f0e3b8;
+
+  --accent: #4e8a35;
+  --accent-secondary: #73ae52;
+  --accent-glow: rgba(78, 138, 53, 0.18);
+  --accent-soft: rgba(78, 138, 53, 0.1);
+  --accent-border: rgba(78, 138, 53, 0.22);
+  --on-accent: #ffffff;
+
+  --text: #2b3a1e;
+  --text-muted: #5c7048;
+  --text-dim: #87996f;
+  --text-faint: #b6c3a3;
+}
+
+/* ----------------------------------------------------------------------------
+   主题 6：沧浪 (canglang)
+   色源：青蓝 #00B7C7 + 沧浪 #B1D5C9
+   气质：青蓝沧浪，清冽开阔
+   -------------------------------------------------------------------------- */
+[data-theme='canglang'] {
+  --bg-root: #eef6f3;
+  --bg-blob-1: #00b7c7;
+  --bg-blob-2: #b1d5c9;
+  --bg-blob-3: #cfeaea;
+
+  --accent: #008b96;
+  --accent-secondary: #5fa89a;
+  --accent-glow: rgba(0, 139, 150, 0.18);
+  --accent-soft: rgba(0, 139, 150, 0.1);
+  --accent-border: rgba(0, 139, 150, 0.22);
+  --on-accent: #ffffff;
+
+  --text: #173a3a;
+  --text-muted: #47706c;
+  --text-dim: #739591;
+  --text-faint: #a8c3bf;
+}
+
+/* ----------------------------------------------------------------------------
+   以下为「与主题无关的机制变量」——浅色统一取值，叠加在主题之上
+   -------------------------------------------------------------------------- */
+:root {
+  /* —— 玻璃材质（浅色）——
+     依据：玻璃拟态四项要素 = 半透明底 + backdrop blur + 细亮边框 + 圆角。
+     浅色玻璃用「白底高透明 + 白色亮边」，才能在彩色背景上呈现磨砂质感。
+     blur 取 14px：research 给出的可用区间是 10~20px，过大会发糊且明显更耗性能。 */
+  --blur-intensity: 14px;
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-bg-hover: rgba(255, 255, 255, 0.72);
+  --glass-bg-active: rgba(255, 255, 255, 0.88);
+  --glass-border: rgba(255, 255, 255, 0.7);
+  --glass-border-hover: rgba(255, 255, 255, 0.95);
+  --glass-inner-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  --glass-shadow: 0 8px 32px rgba(31, 38, 55, 0.1);
+
+  /* 中性交互色（浅色：黑透明） */
+  --neutral-1: rgba(0, 0, 0, 0.03);
+  --neutral-2: rgba(0, 0, 0, 0.06);
+  --neutral-3: rgba(0, 0, 0, 0.1);
+  --neutral-4: rgba(0, 0, 0, 0.16);
+  --scrollbar: rgba(0, 0, 0, 0.12);
+  --scrollbar-hover: rgba(0, 0, 0, 0.22);
+  --input-bg: rgba(255, 255, 255, 0.72);
+
+  /* 语义色 */
+  --info: #2e86ab;
+  --success: #4e8a35;
+  --danger: #c0392b;
+  --violet: #7c6bb0;
+
+  /* 气泡（浅色：淡色填充 + 同色描边） */
+  --bubble-user-bg: rgba(255, 255, 255, 0.8);
+  --bubble-user-border: var(--accent-border);
+  --bubble-assistant-bg: rgba(255, 255, 255, 0.6);
+  --bubble-assistant-border: var(--glass-border);
+  --bubble-radius: 20px;
+  --bubble-tail: 4px;
+
+  /* 间距 */
+  --gap-xs: 4px;
+  --gap-sm: 8px;
+  --gap-md: 12px;
+  --gap-lg: 16px;
+  --gap-xl: 24px;
+  --gap-2xl: 32px;
+
+  /* 圆角（shadcn 约定：单一 --radius 派生尺度） */
+  --radius: 0.75rem;
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.35);
+  --radius-2xl: calc(var(--radius) * 1.7);
+  --radius-pill: 999px;
+
+  /* 动效 */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 0.18s;
+  --dur-base: 0.26s;
+  --dur-slow: 0.36s;
+
+  /* 字体 */
+  --font-scale: 1;
+  --font-sans: "SF Pro Display", "SF Pro", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Consolas, "Liberation Mono", monospace;
+
+  /* 移动端安全区 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  /* ── 响应式布局坐标（供「气泡让位立绘」统一坐标系）───────────────
+     .messages 的百分比是相对 .content（已被侧栏内缩），而 .art 用视口锚点，
+     两者分母不同 → 横屏时气泡会压到立绘上。故把两个量 token 化，
+     气泡宽度一律用视口坐标计算（见 ChatView.svelte）。 */
+  --content-pad: var(--gap-md);
+  /* 外壳左内缩：视口左缘 → .messages 内容起点的距离。
+     默认（无侧栏）仅为 content padding；≥900px 时再加侧栏（margin-left 12 + 宽 84）。 */
+  --shell-left: var(--content-pad);
+  /* 立绘占位宽：竖屏 cover 铺满整宽；横屏 contain 时为 2:3 素材的自然宽（见下方断言）。 */
+  --art-w: 100vw;
+
+  --app-height: 100vh;
+
+  /* 层级 */
+  --z-bg: 0;
+  --z-vignette: 1;
+  --z-content: 2;
+  --z-nav: 10;
+  --z-overlay: 20;
+  --z-modal: 30;
+  --z-toast: 40;
+}
+
+@supports (height: 100dvh) {
+  :root {
+    --app-height: 100dvh;
+  }
+}
+
+/* ≥900px：出现左侧栏（margin-left 12 + 宽 84），外壳左内缩再加上这 96px */
+@media (min-width: 900px) {
+  :root {
+    --shell-left: calc(96px + var(--content-pad));
+  }
+}
+
+/* 横屏族：立绘改 contain（见 BackgroundShader.svelte），其自然宽 = 视口高 × 2/3（素材为 2:3 竖版）。
+   与视口宽取小，防止极端窄屏下越界。66.7vh 是 2/3 的保守上取整（略大于真实宽 → 恒有余量）。 */
+@media (min-aspect-ratio: 1/1) {
+  :root {
+    --art-w: min(100vw, 66.7vh);
+  }
+}
+
+/* 主题切换过渡（避免生硬跳变；首次应用由 JS 跳过） */
+html.theme-transition,
+html.theme-transition * {
+  transition:
+    background-color 0.35s var(--ease-standard),
+    border-color 0.35s var(--ease-standard),
+    color 0.35s var(--ease-standard) !important;
+}

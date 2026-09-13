@@ -1,0 +1,12 @@
+<!-- fixtures/qv-good.html — 好例：扩展 JS 可带 ?v=；script.js 不带 ?v=，lint 必须 pass -->
+<!doctype html>
+<html>
+  <head>
+    <link rel="modulepreload" href="script.js" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script src="scripts/sillybunny-boot-guard.js?v=20260730c"></script>
+    <script type="module" src="script.js"></script>
+  </body>
+</html>

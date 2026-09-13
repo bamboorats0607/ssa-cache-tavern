@@ -1,0 +1,72 @@
+# Tavern 内嵌后端专用配置（Android / nodejs-mobile）
+#
+# 本文件由 MainActivity 在首启播种到 filesDir/tavern/config.yaml（持久区），
+# 之后不再覆盖。上游 src/config-init.js 的 addMissingConfigValues 会用
+# serverDirectory/default/config.yaml 做 _.defaultsDeep 补全，因此本文件
+# 只需列出「与上游默认值不同」或「必须显式钉死」的键。
+#
+# 每个覆盖项的因果依据见下方注释，勿凭直觉改动。
+
+# -- 数据根 --
+# 由 MainActivity 通过 --dataRoot 覆盖为 filesDir/tavern/data（持久）。
+# 此处保留相对默认值仅为占位，实际以 CLI 参数为准。
+dataRoot: ./data
+
+# -- 服务端口与监听面 --
+# 前端 app/src/lib/backend.ts 的 DEFAULT_BASE 硬编码 http://127.0.0.1:4444，
+# 改动此端口必须同步改前端。
+port: 4444
+# 收窄监听面：上游默认 0.0.0.0 会监听全部网卡（含 Wi-Fi/蜂窝），
+# 同网段设备可直接访问。内嵌场景只需要本机环回。
+listenAddress:
+  ipv4: 127.0.0.1
+  ipv6: '[::]'
+# 保持仅 IPv4。上游 server-startup.js 的 #handleServerListenFail 在
+# 「v4 失败 且 未启用 v6」时判定为致命（process.exit(1)）；此处语义明确。
+protocol:
+  ipv4: true
+  ipv6: false
+
+# -- 浏览器自动拉起 --
+# 上游默认为 true。Android 下 getBrowsers() 返回空集，
+# main.js 已额外设 SILLYBUNNY_SKIP_BROWSER_AUTO_LAUNCH=1 双保险。
+browserLaunch:
+  enabled: false
+
+# -- SSL --
+# 内嵌为纯本机环回 http，不需要 TLS（也避免混合内容与自签证书复杂度）。
+ssl:
+  enabled: false
+
+# -- CORS（阻断级修复）--
+# 页面 origin = https://localhost（Capacitor androidScheme:'https'），
+# 后端 origin = http://127.0.0.1:4444 → 跨 origin。
+# 上游默认 origin 仅 ["null"]、methods 仅 ["OPTIONS"]，
+# 会导致响应不带任何 Access-Control-Allow-* 头 → 前端 fetch 被 WebView 判为
+# 跨域不可读 → probeBackend() / fetchCharacters() 全部失败。
+cors:
+  enabled: true
+  origin:
+    - "null"
+    - "https://localhost"
+  methods:
+    - "OPTIONS"
+    - "GET"
+    - "POST"
+  credentials: false
+
+# -- CSRF（阻断级修复）--
+# /api/characters/all 是 POST 路由；跨站子请求不发 Cookie（上游
+# cookieSession 用 sameSite:'lax'）→ 服务端会话每请求重建 → CSRF 校验恒失败
+# → 恒 403 → 角色列表恒空。
+# 关闭后上游仍挂载 GET /csrf-token 并返回 {token:'disabled'}，
+# 前端 chat.ts 的 getCsrfToken() 逻辑可正常工作。
+#
+# 威胁模型说明：enableUserAccounts 为 false（单用户），
+# src/users.js 的 setUserDataMiddleware 直接注入 DEFAULT_USER，
+# 系统本就不依赖 session cookie 鉴权，故 CSRF 防护在本机环回语境下无实际意义。
+disableCsrfProtection: true
+
+# -- 白名单 --
+# 保持上游默认：仅 ::1 / 127.0.0.1 / 私网段。
+whitelistMode: true

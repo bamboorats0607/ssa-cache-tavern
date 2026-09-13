@@ -1,0 +1,49 @@
+﻿
+> app@0.0.0 verify:build-determinism
+> node scripts/verify-determinism.mjs
+
+[round 1] vite build ...
+[36mvite v8.3.0 [32mbuilding client environment for production...[36m[39m
+transforming...
+✓ 115 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.45 kB │ gzip:  0.29 kB
+dist/assets/vite-BF8QNONU.svg    8.70 kB │ gzip:  1.60 kB
+dist/assets/hero-CLDdwZDr.png   13.05 kB
+dist/assets/index-CgA-1d2U.css   4.13 kB │ gzip:  1.46 kB
+dist/assets/index-KAE8l9dQ.js   30.68 kB │ gzip: 12.36 kB
+
+[32m✓ built in 97ms[39m
+[round 2] vite build ...
+[36mvite v8.3.0 [32mbuilding client environment for production...[36m[39m
+transforming...
+✓ 115 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                  0.45 kB │ gzip:  0.29 kB
+dist/assets/vite-BF8QNONU.svg    8.70 kB │ gzip:  1.60 kB
+dist/assets/hero-CLDdwZDr.png   13.05 kB
+dist/assets/index-CgA-1d2U.css   4.13 kB │ gzip:  1.46 kB
+dist/assets/index-KAE8l9dQ.js   30.68 kB │ gzip: 12.36 kB
+
+[32m✓ built in 109ms[39m
+
+[round 1] 7 个产物
+  881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c  assets/hero-CLDdwZDr.png
+  a858ca4d41e7558634e3af481b9fd18fef76e8628adad9414f236b1a9d5ee742  assets/index-CgA-1d2U.css
+  594268abb7bb60c830352025197ad3efb28d64f3f4dbbb8e3d02e382726d1777  assets/index-KAE8l9dQ.js
+  5be21acd42eb7b896e517f4e0f0f11eb5c5d9e54fbbcebe9453f033008fcca6f  assets/vite-BF8QNONU.svg
+  61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66  favicon.svg
+  b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a  icons.svg
+  1c9a3729e005e1e0c3aec76560c4cc1e8663b79a7877de80125c16b14be4bae3  index.html
+[round 2] 7 个产物
+  881ffbcaafc212e49addad08846a5b82761355fa20624253af3477ba33262c5c  assets/hero-CLDdwZDr.png
+  a858ca4d41e7558634e3af481b9fd18fef76e8628adad9414f236b1a9d5ee742  assets/index-CgA-1d2U.css
+  594268abb7bb60c830352025197ad3efb28d64f3f4dbbb8e3d02e382726d1777  assets/index-KAE8l9dQ.js
+  5be21acd42eb7b896e517f4e0f0f11eb5c5d9e54fbbcebe9453f033008fcca6f  assets/vite-BF8QNONU.svg
+  61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66  favicon.svg
+  b45fa506195cfcdef406ba9f0c77b36ddc1a7c224040926ec70abc2fdea7b93a  icons.svg
+  1c9a3729e005e1e0c3aec76560c4cc1e8663b79a7877de80125c16b14be4bae3  index.html
+
+DIFF == 0 — 两次构建产物（文件名 + 内容 sha256）完全一致。

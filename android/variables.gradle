@@ -1,0 +1,27 @@
+ext {
+    minSdkVersion = 24
+    compileSdkVersion = 36
+    targetSdkVersion = 36
+
+    /**
+     * 发布版包含的 ABI。
+     *
+     * 为什么只留 arm64-v8a：内嵌后端的 libnode.so 单 ABI 就 80MB 左右，
+     * 三个 ABI 合计 241MB（实测）。x86_64 仅模拟器需要、armeabi-v7a 已是
+     * 极少数存量设备，发布包带上它们纯属体积浪费。
+     * 调试需要时用 debug 变体（其 abiFilters 单独声明为 arm64 + x86_64）。
+     */
+    releaseAbis = 'arm64-v8a'
+
+    androidxActivityVersion = '1.11.0'
+    androidxAppCompatVersion = '1.7.1'
+    androidxCoordinatorLayoutVersion = '1.3.0'
+    androidxCoreVersion = '1.17.0'
+    androidxFragmentVersion = '1.8.9'
+    coreSplashScreenVersion = '1.2.0'
+    androidxWebkitVersion = '1.14.0'
+    junitVersion = '4.13.2'
+    androidxJunitVersion = '1.3.0'
+    androidxEspressoCoreVersion = '3.7.0'
+    cordovaAndroidVersion = '14.0.1'
+}

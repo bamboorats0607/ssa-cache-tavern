@@ -1,0 +1,23 @@
+{
+  "name": "tavern-shell",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "tavern 跨端壳（Capacitor）— 形态 (a)：完整内嵌 SillyBunny 后端 + web 资产",
+  "scripts": {
+    "build:web": "npm --prefix app run build",
+    "prepare:backend": "node scripts/prepare-backend.mjs",
+    "sync": "npx cap sync android",
+    "apk:debug": "D:\\dev-tools\\gradle-8.13\\bin\\gradle.bat -p android assembleDebug --no-daemon",
+    "apk:release": "powershell -NoProfile -Command \"$env:PATH='D:\\dev-tools\\ninja;'+$env:PATH; & 'D:\\dev-tools\\gradle-8.13\\bin\\gradle.bat' -p android assembleRelease --no-daemon\"",
+    "release": "npm run build:web && npm run prepare:backend && npm run sync && npm run apk:release"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.5.1",
+    "@capacitor/cli": "^8.5.1",
+    "@capacitor/core": "^8.5.1"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.0"
+  }
+}
