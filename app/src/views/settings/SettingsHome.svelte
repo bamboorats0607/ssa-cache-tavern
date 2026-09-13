@@ -25,11 +25,12 @@
 
   /**
    * 使用情况概览：直接显示缓存命中率，让用户不进页面也能判断缓存是否生效。
-   * 无记录时显示轮次数为 0，而不是显示「0%」（会被误读成缓存失效）。
+   * 无记录时**不显示「0%」**（会被误读成缓存失效），而是给一句可执行的说明——
+   * 「暂无记录」看起来像功能没做，这里明确告诉用户「聊一句就会开始统计」。
    */
   const usageSummary = $derived.by(() => {
     const turns = sessions.list.reduce((n, s) => n + s.turns.length, 0);
-    if (turns === 0) return '暂无记录';
+    if (turns === 0) return '聊一句即开始统计';
     let input = 0;
     let cached = 0;
     for (const s of sessions.list) {
@@ -67,6 +68,9 @@
       onclick={() => onNavigate('model')}
     />
     <SettingRow label="预设" value={modelConfig.preset} onclick={() => onNavigate('preset')} />
+    <!-- 使用情况放在第一组：它统计的就是模型调用与缓存命中，与上面三项同域；
+         同时保证首屏可见（此前埋在第 7 组，用户反馈「做好了但没看见」）。 -->
+    <SettingRow label="使用情况" value={usageSummary} onclick={() => onNavigate('usage')} />
   </SettingGroup>
 
   <SettingGroup>
@@ -125,7 +129,6 @@
   </SettingGroup>
 
   <SettingGroup>
-    <SettingRow label="使用情况" value={usageSummary} onclick={() => onNavigate('usage')} />
     <SettingRow label="存储空间" onclick={() => onNavigate('storage')} />
     <SettingRow label="备份与恢复" onclick={() => onNavigate('backup')} />
   </SettingGroup>

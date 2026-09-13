@@ -14,7 +14,7 @@
   import Avatar from '../lib/Avatar.svelte';
   import { characters } from '../stores/characters.svelte';
   import type { CharacterCard, CharacterInput, CharacterPreserve } from '../lib/backend';
-  import { characterAvatarUrl } from '../lib/backend';
+  import { characterAvatarUrl, importCharacter, translateText } from '../lib/backend';
   import { pushBack } from '../lib/back';
   import { logger } from '../lib/logger';
 
@@ -25,6 +25,115 @@
   let { onOpenChat }: Props = $props();
 
   let loading = $state(false);
+
+  // ── 导入角色卡 ────────────────────────────────────────────────────────────
+  // 支持格式与上游 formatImportFunctions 对齐（JSON / PNG / YAML / CHARX / BYAF）。
+  // PNG 卡是「图片内嵌元数据」，后端直接读 tEXt chunk，本地无需解析。
+  let importInput = $state<HTMLInputElement | null>(null);
+  let importing = $state(false);
+  /** 导入结果提示（成功/失败都走这里，不打断操作流） */
+  let importHint = $state<{ ok: boolean; text: string } | null>(null);
+
+  function openImport() {
+    importHint = null;
+    importInput?.click();
+  }
+
+  async function onPickImport(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // 允许重复选同一文件
+    if (!file) return;
+    importing = true;
+    importHint = null;
+    const res = await importCharacter(file);
+    importing = false;
+    if (!res.ok) {
+      importHint = { ok: false, text: res.error ?? '导入失败' };
+      return;
+    }
+    importHint = { ok: true, text: `已导入「${res.name}」` };
+    logger.info('characters', '角色卡导入成功', { name: res.name });
+    await characters.load(true);
+  }
+
+  // ── 角色卡翻译 ────────────────────────────────────────────────────────────
+  // 用途：导入的外文角色卡（社区卡多为英文/日文）翻成自己读得懂的语言。
+  // 设计取舍：**先预览再应用**，绝不直接覆盖用户数据；角色名不翻译
+  // （名字是身份标识，翻掉会让会话归属与角色卡对不上）。
+  const TRANSLATE_FIELDS = [
+    { key: 'description', label: '描述' },
+    { key: 'personality', label: '性格' },
+    { key: 'scenario', label: '场景' },
+    { key: 'firstMes', label: '开场白' },
+    { key: 'mesExample', label: '示例对话' },
+    { key: 'creatorNotes', label: '创作者备注' },
+  ] as const;
+
+  const TRANSLATE_LANGS = [
+    { id: 'zh-CN', label: '简体中文' },
+    { id: 'zh-TW', label: '繁體中文' },
+    { id: 'en', label: 'English' },
+    { id: 'ja', label: '日本語' },
+    { id: 'ko', label: '한국어' },
+  ] as const;
+
+  let translateOpen = $state(false);
+  let translateLang = $state<string>('zh-CN');
+  let translating = $state(false);
+  let translateProgress = $state('');
+  let translateError = $state<string | null>(null);
+  /** 翻译结果（字段 → 译文），null = 尚未翻译 */
+  let translateResult = $state<Record<string, string> | null>(null);
+
+  function openTranslate() {
+    translateOpen = true;
+    translateResult = null;
+    translateError = null;
+    translateProgress = '';
+  }
+
+  function closeTranslate() {
+    translateOpen = false;
+    translateResult = null;
+    translateError = null;
+  }
+
+  async function runTranslate() {
+    const fields = TRANSLATE_FIELDS.filter((f) => (draft[f.key] ?? '').trim());
+    if (!fields.length) {
+      translateError = '这个角色卡没有可翻译的文本内容';
+      return;
+    }
+    translating = true;
+    translateError = null;
+    translateResult = null;
+    const out: Record<string, string> = {};
+    for (let i = 0; i < fields.length; i++) {
+      const f = fields[i];
+      translateProgress = `翻译中 ${i + 1}/${fields.length}：${f.label}`;
+      const res = await translateText(draft[f.key], translateLang);
+      if (!res.ok) {
+        translating = false;
+        translateProgress = '';
+        translateError = `${f.label} 翻译失败：${res.error}`;
+        return;
+      }
+      out[f.key] = res.text ?? '';
+    }
+    translating = false;
+    translateProgress = '';
+    translateResult = out;
+    logger.info('characters', '角色卡翻译完成', { lang: translateLang, fields: fields.length });
+  }
+
+  function applyTranslation() {
+    if (!translateResult) return;
+    for (const [k, v] of Object.entries(translateResult)) {
+      draft[k as keyof Draft] = v;
+    }
+    closeTranslate();
+  }
 
   /** 表单草稿：tags 用逗号分隔字符串输入，提交时切分成数组。 */
   interface Draft {
@@ -174,13 +283,31 @@
 <div class="chars-page">
   <header class="page-bar">
     <h1>角色</h1>
-    <button class="add" onclick={openCreate} aria-label="新建角色" title="新建角色">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-    </button>
+    <div class="bar-actions">
+      <button class="btn btn-sm" onclick={openImport} disabled={importing}>
+        {importing ? '导入中…' : '导入角色卡'}
+      </button>
+      <button class="add" onclick={openCreate} aria-label="新建角色" title="新建角色">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+      </button>
+    </div>
+    <!-- 隐藏的文件选择器，由「导入角色卡」触发；PNG 卡走图片内嵌元数据，无需额外解析 -->
+    <input
+      class="file-input"
+      type="file"
+      accept=".json,.png,.yaml,.yml,.charx,.byaf"
+      bind:this={importInput}
+      onchange={onPickImport}
+    />
   </header>
 
   {#if characters.lastError}
     <div class="banner error" role="alert">{characters.lastError}</div>
+  {/if}
+  {#if importHint}
+    <div class="banner" class:ok={importHint.ok} class:error={!importHint.ok} role="status">
+      {importHint.text}
+    </div>
   {/if}
 
   {#if loading && characters.list.length === 0}
@@ -245,8 +372,59 @@
     >
       <header class="modal-bar">
         <h2>{editingName ? '编辑角色' : '新建角色'}</h2>
-        <button class="close" onclick={closeForm} aria-label="关闭">✕</button>
+        <div class="bar-actions">
+          <button class="btn btn-sm" onclick={openTranslate} disabled={translating}>翻译</button>
+          <button class="close" onclick={closeForm} aria-label="关闭">✕</button>
+        </div>
       </header>
+
+      {#if translateOpen}
+        <!-- 翻译面板：先预览再应用（不直接覆盖用户数据） -->
+        <section class="translate-panel">
+          <div class="tp-head">
+            <span class="tp-title">翻译角色卡</span>
+            <select
+              class="tp-select"
+              value={translateLang}
+              onchange={(e) => (translateLang = e.currentTarget.value)}
+              disabled={translating}
+              aria-label="目标语言"
+            >
+              {#each TRANSLATE_LANGS as l (l.id)}
+                <option value={l.id}>{l.label}</option>
+              {/each}
+            </select>
+            <button class="btn btn-sm" onclick={runTranslate} disabled={translating}>
+              {translating ? '翻译中…' : '开始翻译'}
+            </button>
+            <button class="btn btn-sm" onclick={closeTranslate} disabled={translating}>收起</button>
+          </div>
+          <p class="tp-note">
+            译文仅作预览，点「应用到表单」才会写入；角色名不翻译（它是会话归属键）。
+          </p>
+          {#if translating}
+            <p class="tp-progress">{translateProgress}</p>
+          {/if}
+          {#if translateError}
+            <p class="tp-error" role="alert">{translateError}</p>
+          {/if}
+          {#if translateResult}
+            <div class="tp-preview">
+              {#each TRANSLATE_FIELDS as f (f.key)}
+                {#if translateResult[f.key]}
+                  <div class="tp-item">
+                    <span class="tp-label">{f.label}</span>
+                    <p class="tp-text">{translateResult[f.key]}</p>
+                  </div>
+                {/if}
+              {/each}
+            </div>
+            <div class="tp-actions">
+              <button class="btn btn-accent btn-sm" onclick={applyTranslation}>应用到表单</button>
+            </div>
+          {/if}
+        </section>
+      {/if}
       <div class="modal-body">
         <label class="field">
           <span class="field-label">角色名 *</span>
@@ -403,6 +581,103 @@
     border: 1px solid rgba(192, 57, 43, 0.3);
     color: var(--danger);
     font-size: 0.8rem;
+  }
+  .banner.ok {
+    padding: 10px 14px;
+    border-radius: var(--radius-lg);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-border);
+    color: var(--accent);
+    font-size: 0.8rem;
+  }
+
+  /* 工具栏右侧动作区（导入 + 新建）*/
+  .bar-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--gap-sm);
+  }
+  .btn-sm {
+    padding: 7px 12px;
+    font-size: 0.76rem;
+  }
+  .file-input {
+    display: none;
+  }
+
+  /* 翻译面板（表单内嵌，先预览再应用）*/
+  .translate-panel {
+    margin: 0 var(--gap-lg);
+    padding: var(--gap-md);
+    border-radius: var(--radius-lg);
+    border: 1px solid var(--accent-border);
+    background: var(--accent-soft);
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap-sm);
+  }
+  .tp-head {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--gap-sm);
+  }
+  .tp-title {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-right: auto;
+  }
+  .tp-select {
+    padding: 6px 8px;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--glass-border);
+    background: var(--input-bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.78rem;
+  }
+  .tp-note {
+    margin: 0;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    line-height: 1.5;
+  }
+  .tp-progress,
+  .tp-error {
+    margin: 0;
+    font-size: 0.76rem;
+  }
+  .tp-error {
+    color: var(--danger);
+  }
+  .tp-preview {
+    max-height: 220px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap-sm);
+  }
+  .tp-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .tp-label {
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: var(--text-dim);
+  }
+  .tp-text {
+    margin: 0;
+    font-size: 0.78rem;
+    line-height: 1.5;
+    color: var(--text);
+    white-space: pre-wrap;
+  }
+  .tp-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   .list {

@@ -176,6 +176,170 @@ export async function uploadBackground(
   }
 }
 
+export interface ImportResult {
+  ok: boolean;
+  /** 后端落盘后的名称（角色卡为文件名、世界书为世界名） */
+  name?: string;
+  error?: string;
+}
+
+/**
+ * 角色卡可导入格式 —— 必须与上游 `formatImportFunctions` 的键一致
+ * （server-ref/src/endpoints/characters.js:1944）：后端**按 `file_type` 分派**导入函数，
+ * 不传或传未知值会抛 `Unsupported format` 并返回 `{error:true}`。
+ */
+const CHARACTER_IMPORT_TYPES = ['json', 'png', 'yaml', 'yml', 'charx', 'byaf'] as const;
+
+/** 从文件名推导入类型；不支持则返回 null。 */
+function importTypeOf(fileName: string): string | null {
+  const ext = (fileName.split('.').pop() ?? '').toLowerCase();
+  return (CHARACTER_IMPORT_TYPES as readonly string[]).includes(ext) ? ext : null;
+}
+
+/**
+ * 导入角色卡（JSON / PNG / YAML / CHARX / BYAF）。
+ *
+ * 契约：`POST /api/characters/import`（server-ref/src/endpoints/characters.js:1934）
+ *  · multipart，文件字段名 `avatar`（上游全局 multer `.single('avatar')`）；
+ *  · **必须**带 `file_type`（见 CHARACTER_IMPORT_TYPES）；
+ *  · 成功返回 `{ file_name }`；失败**也返回 HTTP 200 + `{ error: true }`** ——
+ *    所以不能只看 res.ok，必须解析响应体。
+ */
+export async function importCharacter(
+  file: File,
+  base = getBaseUrl(),
+): Promise<ImportResult> {
+  const type = importTypeOf(file.name);
+  if (!type) {
+    return {
+      ok: false,
+      error: '不支持的格式（支持 JSON / PNG / YAML / CHARX / BYAF 角色卡）',
+    };
+  }
+  try {
+    const token = await getCsrfToken();
+    const fd = new FormData();
+    fd.append('avatar', file);
+    fd.append('file_type', type);
+    const res = await fetch(`${base}/api/characters/import`, {
+      method: 'POST',
+      headers: { ...(token ? { 'X-CSRF-Token': token } : {}) },
+      body: fd,
+      signal: AbortSignal.timeout(60000),
+    });
+    if (res.status === 404 || res.status === 405) {
+      return { ok: false, error: '当前后端不支持角色卡导入（可能是精简后端）' };
+    }
+    if (!res.ok) {
+      return { ok: false, error: `导入失败（${res.status}）` };
+    }
+    const data = (await res.json().catch(() => null)) as { file_name?: string; error?: unknown } | null;
+    if (!data || data.error || !data.file_name) {
+      logger.warn('backend', '角色卡导入被拒', { data });
+      return { ok: false, error: '这个文件不是有效的角色卡（或格式不受支持）' };
+    }
+    logger.info('backend', '角色卡导入完成', { file_name: data.file_name });
+    return { ok: true, name: data.file_name };
+  } catch (e) {
+    logger.warn('backend', '角色卡导入异常', e);
+    return { ok: false, error: '网络异常，未能连接到后端' };
+  }
+}
+
+/**
+ * 导入世界书（JSON）。
+ *
+ * 契约：`POST /api/worldinfo/import`（server-ref/src/endpoints/worldinfo.js:214）
+ *  · multipart，文件字段名 `avatar`（同上，复用全局 multer）；
+ *  · 可选 `name`（世界名；缺省取上传文件名去扩展名）；
+ *  · 成功返回 `{ name }`；非法世界书返回 400「Is not a valid world info file」。
+ */
+export async function importWorldbook(
+  file: File,
+  name?: string,
+  base = getBaseUrl(),
+): Promise<ImportResult> {
+  try {
+    const token = await getCsrfToken();
+    const fd = new FormData();
+    fd.append('avatar', file);
+    const worldName = name ?? file.name.replace(/\.[^.]+$/, '');
+    if (worldName) fd.append('name', worldName);
+    const res = await fetch(`${base}/api/worldinfo/import`, {
+      method: 'POST',
+      headers: { ...(token ? { 'X-CSRF-Token': token } : {}) },
+      body: fd,
+      signal: AbortSignal.timeout(60000),
+    });
+    if (res.status === 404 || res.status === 405) {
+      return { ok: false, error: '当前后端不支持世界书导入（可能是精简后端）' };
+    }
+    if (res.status === 400) {
+      return { ok: false, error: '这不是有效的世界书文件' };
+    }
+    if (!res.ok) {
+      return { ok: false, error: `导入失败（${res.status}）` };
+    }
+    const data = (await res.json().catch(() => null)) as { name?: string } | null;
+    if (!data?.name) return { ok: false, error: '后端未返回世界书名称' };
+    logger.info('backend', '世界书导入完成', { name: data.name });
+    return { ok: true, name: data.name };
+  } catch (e) {
+    logger.warn('backend', '世界书导入异常', e);
+    return { ok: false, error: '网络异常，未能连接到后端' };
+  }
+}
+
+export interface TranslateResult {
+  ok: boolean;
+  text?: string;
+  error?: string;
+}
+
+/**
+ * 文本翻译（用于把导入的外文角色卡翻成用户语言）。
+ *
+ * 契约：`POST /api/translate/google`（server-ref/src/endpoints/translate.js:76）
+ *  · body `{ text, lang }`（lang 为 BCP-47，如 `zh-CN`）；
+ *  · **成功时响应体是纯文本译文**，不是 JSON；
+ *  · 缺 text/lang → 400；上游翻译服务异常 → 500。
+ *
+ * 为什么用 google 而不是其它 provider：它是上游唯一**不需要密钥**的通用通道
+ * （libre/deepl/yandex 等需用户自备实例或密钥）。质量要求高时可在此加 provider 选择。
+ */
+export async function translateText(
+  text: string,
+  lang: string,
+  base = getBaseUrl(),
+): Promise<TranslateResult> {
+  if (!text.trim()) return { ok: true, text: '' };
+  try {
+    const token = await getCsrfToken();
+    const res = await fetch(`${base}/api/translate/google`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'X-CSRF-Token': token } : {}),
+      },
+      body: JSON.stringify({ text, lang }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (res.status === 404 || res.status === 405) {
+      return { ok: false, error: '当前后端不支持翻译（可能是精简后端）' };
+    }
+    if (res.status === 400) {
+      return { ok: false, error: '翻译服务拒绝了该请求（文本为空或语言不受支持）' };
+    }
+    if (!res.ok) return { ok: false, error: `翻译失败（${res.status}）` };
+    const out = await res.text();
+    if (!out.trim()) return { ok: false, error: '翻译服务返回了空结果' };
+    return { ok: true, text: out };
+  } catch (e) {
+    logger.warn('backend', '翻译异常', e);
+    return { ok: false, error: '网络异常，未能连接到后端' };
+  }
+}
+
 /**
  * 探测后端。内部重试若干次（App 冷启动时内嵌 Node 需要时间就绪）。
  * 返回对用户友好的状态 + 内部信息（后者只入日志）。

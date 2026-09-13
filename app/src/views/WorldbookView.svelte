@@ -16,8 +16,38 @@
   import { onMount } from 'svelte';
   import { worldbook } from '../stores/worldbook.svelte';
   import type { WorldInfoEntry } from '../lib/context/assembler';
+  import { importWorldbook } from '../lib/backend';
   import { pushBack } from '../lib/back';
   import { logger } from '../lib/logger';
+
+  // ── 导入世界书 ────────────────────────────────────────────────────────────
+  // 契约：POST /api/worldinfo/import（multipart，文件字段 avatar，可选 name）→ { name }
+  let importInput = $state<HTMLInputElement | null>(null);
+  let importing = $state(false);
+  let importHint = $state<{ ok: boolean; text: string } | null>(null);
+
+  function openImport() {
+    importHint = null;
+    importInput?.click();
+  }
+
+  async function onPickImport(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ''; // 允许重复选同一文件
+    if (!file) return;
+    importing = true;
+    importHint = null;
+    const res = await importWorldbook(file);
+    importing = false;
+    if (!res.ok) {
+      importHint = { ok: false, text: res.error ?? '导入失败' };
+      return;
+    }
+    importHint = { ok: true, text: `已导入「${res.name}」` };
+    logger.info('worldbook', '世界书导入成功', { name: res.name });
+    await refresh();
+  }
 
   /** 弹层里的条目草稿：origin 保留原始字段（keysecondary/order/position 等），
    *  仅覆盖被编辑的三个主字段，确保编辑社区世界书时不丢字段（round-trip）。 */
@@ -217,6 +247,9 @@
   <header class="page-bar">
     <h1>世界书</h1>
     <div class="bar-actions">
+      <button class="btn btn-sm" onclick={openImport} disabled={importing}>
+        {importing ? '导入中…' : '导入'}
+      </button>
       <button class="add" onclick={refresh} aria-label="刷新世界书列表" title="刷新">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M20 11a8 8 0 10-2.3 5.7M20 4v6h-6" />
@@ -226,10 +259,23 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
       </button>
     </div>
+    <!-- 隐藏的文件选择器，由「导入」触发 -->
+    <input
+      class="file-input"
+      type="file"
+      accept=".json"
+      bind:this={importInput}
+      onchange={onPickImport}
+    />
   </header>
 
   {#if worldbook.lastWriteError}
     <div class="banner error" role="alert">{worldbook.lastWriteError}</div>
+  {/if}
+  {#if importHint}
+    <div class="banner" class:ok={importHint.ok} class:error={!importHint.ok} role="status">
+      {importHint.text}
+    </div>
   {/if}
 
   {#if loading && worldbook.list.length === 0}
@@ -504,6 +550,21 @@
     border: 1px solid rgba(192, 57, 43, 0.3);
     color: var(--danger);
     font-size: 0.8rem;
+  }
+  .banner.ok {
+    padding: 10px 14px;
+    border-radius: var(--radius-lg);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-border);
+    color: var(--accent);
+    font-size: 0.8rem;
+  }
+  .btn-sm {
+    padding: 7px 12px;
+    font-size: 0.76rem;
+  }
+  .file-input {
+    display: none;
   }
 
   .list {
