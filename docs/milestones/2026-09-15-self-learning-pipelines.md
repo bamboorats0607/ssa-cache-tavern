@@ -43,15 +43,26 @@
 
 ## 三、门禁与实测数字
 
-门禁脚本位于本机开发目录的 `spikes/`（**未随公开仓入库**，见第六节），可复现命令如下。
+门禁脚本位于本机开发目录的 `spikes/`（**未随公开仓入库**，见第六节）。
+
+```bash
+node spikes/s5-embedded-backend/learning-corpus-test.mjs     # 语料通道（G0+G1）
+node spikes/s5-embedded-backend/learning-provision-test.mjs  # 四通道管线（G2）
+node spikes/s5-embedded-backend/learning-gate-test.mjs       # 确认闸（G3）
+node spikes/s5-embedded-backend/learning-apply-test.mjs      # 落盘（G4）
+node spikes/s5-embedded-backend/learning-storage-probe.mjs   # 体积实测（G5）
+npx playwright test                                          # 端到端（app/ 下）
+# 外部语料（真实语料只在本地注入，不入库）：
+#   LEARNING_CORPUS=<path> node spikes/s5-embedded-backend/learning-provision-test.mjs
+```
 
 | 门禁 | 宽度 | 结果 |
 |---|---|---|
 | 语料通道 | 单角色映射 / 群聊排除 / 空文本丢弃 | 17/17 PASS |
 | 四通道管线 | 格式 / 单调方向 / 规模告警 | 21/21（+外部语料 24/24） |
-| 确认闸 | 台账 / 去重 / 反橡皮图章 / 体积 / 状态机 | 33/33（+外部语料 36/36） |
+| 确认闸 | 台账 / 去重 / 反橡皮图章 / 体积 / 状态机 | 34/34（+外部语料 37/37） |
 | 落盘 | 往返无损 / 前缀块安全 / 合并摘除 / 回滚语义 | 20/20（+外部语料 23/23） |
-| 端到端 | 面板行为 + 真写世界书（内存桩） | 16/16 PASS |
+| 端到端 | 面板行为 + 真写世界书（内存桩） | 学习面板 16/16 PASS |
 | 回归 | 群聊 / 接线 / 会话 | 29/29 · 36/36 · 40/40 |
 | 类型检查 | svelte-check | 0 errors / 0 warnings |
 | 单角色路径基线 | 字节指纹 | PASS（未漂移） |
@@ -108,6 +119,6 @@ JS 一般比桌面慢 3–5 倍，4 000 条在真机上约 1–2 秒，已在「
 - 无凭据、无签名文件、无第三方源码副本、无构建产物入库；不含任何本机绝对路径。
 - e2e 夹具与门禁脚本的语料**全部自造**，真实语料只经环境变量在本地注入，不入库。
 - **门禁脚本不在公开仓内**：`.gitignore` 以 `spikes/` 整目录排除一次性实验产物（含截图与 dump），
-  本功能的四个门禁脚本因此也不入库 —— 即 clone 本仓**无法**复现第三节的门禁数字。
-  如需可复现，最小改动是加三条负向规则（只反排除这四个脚本），但整目录反排除会把截图一并带出，
-  故**保持现状并如实登记**。
+  本功能的五个门禁脚本因此也不入库 —— 即 clone 本仓**无法**复现第三节的门禁数字。
+  如需可复现，最小改动是给这五个脚本各加一条负向规则（`!spikes/...`），但整目录反排除会把
+  截图一并带出，故**保持现状并如实登记**。
