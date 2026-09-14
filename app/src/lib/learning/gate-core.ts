@@ -19,6 +19,8 @@
  */
 
 import type { ProvisionSuggestions } from './provision/index.ts';
+// 静默触发状态键（值定义在 `silent-trigger.ts`：那边不 import 本模块，无循环）
+import { TRIGGER_KEY } from './silent-trigger.ts';
 
 // ---------------------------------------------------------------------------
 // 建议条目：5 类产物 → 用户可读列表项
@@ -518,15 +520,18 @@ export function saveSandbox(storage: StorageLike | null, rec: SandboxRecord | nu
   }
 }
 
-/** 门禁用：学习路径**允许**读取的键（白名单）。群聊键不在其中。 */
-export const LEARNING_READ_KEYS = [CORPUS_SESSION_KEY, SANDBOX_KEY] as const;
+/**
+ * 门禁用：学习路径**允许**读取的键（白名单）。群聊键不在其中。
+ * `tavern.learning.trigger` = 静默触发状态（自动开关 + 节流基线），见 `silent-trigger.ts`。
+ */
+export const LEARNING_READ_KEYS = [CORPUS_SESSION_KEY, SANDBOX_KEY, TRIGGER_KEY] as const;
 
 /**
  * 门禁用：学习路径**允许**写入的键（白名单）。
  * 注意：世界书正文（含副本）**不写 localStorage**，而是经 `worldbook.saveRawBook()`
  * 走后端 `/api/worldinfo/edit`（R-13 无文件导入；C-10 不新增端口/进程）。
  */
-export const LEARNING_WRITE_KEYS = [LEDGER_KEY, SANDBOX_KEY] as const;
+export const LEARNING_WRITE_KEYS = [LEDGER_KEY, SANDBOX_KEY, TRIGGER_KEY] as const;
 
 /**
  * 裁剪语料到窗口上限（T2.3 的主线程预算）。

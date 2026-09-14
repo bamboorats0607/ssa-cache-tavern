@@ -147,7 +147,7 @@ function stubWorldbook(): WbStub {
  * `stubBackend` 同时装世界书桩（内存书 + 写入记录）：`/worldinfo/edit` 是
  * 真写盘动作的落点，必须是**有状态**的，否则「采纳到底写了什么」无从断言。
  */
-async function stubBackend(page: Page, wb: WbStub = stubWorldbook()) {
+async function stubBackend(page: Page, wb: WbStub = stubWorldbook(), chars: unknown[] = []) {
   await page.addInitScript(() => {
     localStorage.setItem('tavern.backendUrl', location.origin);
     localStorage.setItem('tavern.backendEverReady', '1');
@@ -156,8 +156,18 @@ async function stubBackend(page: Page, wb: WbStub = stubWorldbook()) {
     r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true, mode: 'fallback' }) }),
   );
   await page.route('**/api/characters/all', (r) =>
-    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([]) }),
+    r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(chars) }),
   );
+  if (chars.length > 0) {
+    // 角色卡带头像时 App 会去取图；给个 1×1 的图，避免无关的失败请求干扰断言
+    await page.route('**/characters/*.png', (r) =>
+      r.fulfill({
+        status: 200,
+        contentType: 'image/svg+xml',
+        body: '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#888"/></svg>',
+      }),
+    );
+  }
   await page.route('**/api/worldinfo/list', (r) =>
     r.fulfill({
       status: 200,
@@ -195,11 +205,54 @@ async function readSandbox(page: Page) {
   return raw === null ? null : JSON.parse(raw);
 }
 
-async function seedSession(page: Page) {
+async function seedSession(page: Page, list: unknown = SESSIONS) {
   await page.addInitScript(
-    ([list]) => localStorage.setItem('tavern.sessions', JSON.stringify(list)),
-    [SESSIONS],
+    ([l]) => localStorage.setItem('tavern.sessions', JSON.stringify(l)),
+    [list],
   );
+}
+
+/** 桩：模型回复（单角色路径）。收到 POST 即回一条固定回复，让一轮**真的落盘**。 */
+async function stubChat(page: Page) {
+  let n = 0;
+  await page.route('**/api/backends/chat-completions/generate', async (r) => {
+    n++;
+    await r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        choices: [{ message: { content: `第 ${n} 轮回复：钟楼与银线，这两件事本就相连。` } }],
+        usage: { prompt_tokens: 1000, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 512 } },
+      }),
+    });
+  });
+}
+
+/** 读触发状态（没写过时返回 null）。 */
+async function readTrigger(page: Page) {
+  const raw = await page.evaluate(() => localStorage.getItem('tavern.learning.trigger'));
+  return raw === null ? null : JSON.parse(raw);
+}
+
+/**
+ * 回聊天页发一条消息，等回复气泡出现 —— 这就是学习闸的**事件源**。
+ * `turn` = 这是本次页面会话里的第几条（桩按序编号回复，便于唯一定位）。
+ */
+async function sendOneTurn(page: Page, text: string, turn = 1) {
+  await page.getByRole('button', { name: '聊天', exact: true }).first().click();
+  const input = page.locator('textarea[aria-label="消息输入"]');
+  await expect(input).toBeVisible();
+  await input.fill(text);
+  // exact：单角色路径同时有「发送图片」按钮，不精确匹配会命中两个（strict 冲突）
+  await page.getByRole('button', { name: '发送', exact: true }).click();
+  await expect(page.getByText(`第 ${turn} 轮回复`)).toBeVisible({ timeout: 15000 });
+}
+
+/** 回「设置 → 学习建议」（静默写入后复核面板数字用）。 */
+async function reopenLearning(page: Page) {
+  await page.getByRole('button', { name: '设置', exact: true }).first().click();
+  await page.getByRole('button', { name: /学习建议/ }).click();
+  await expect(page.locator('h1')).toHaveText('学习建议');
 }
 
 /** 让 App 启动时就认为「《测试书》已启用」（等价于用户在世界书页选过它）。 */
@@ -600,5 +653,166 @@ test.describe('学习建议面板', () => {
     expect(await readSandbox(page), '沙盒记录此时本就不该存在').toBeNull();
     // 源书仍可正常被克隆（说明切回后状态可用）
     await expect(page.getByRole('button', { name: '创建并启用副本' })).toBeEnabled();
+  });
+});
+
+test.describe('自动学习（静默路径）', () => {
+  /**
+   * 静默路径的**触发源是「一轮对话完成」这个事件**（不是定时器）。
+   *
+   * 夹具要点（踩过）：① 触发会话的**新增轮数**必须 ≥ `SILENT_MIN_TURNS`(2)，
+   * 所以夹具会话要够长 —— 实测 2 轮会话产不出任何可落盘产物；② 必须注入与夹具
+   * 同名的角色，否则发送会新建一条 1 轮的空会话，静默预算不足；
+   * ③ 克隆副本本身就是一次 `worldinfo/edit`，写入基线要在克隆**之后**取。
+   */
+  const CHAR = '艾拉';
+  const CHARS = [{ name: CHAR, avatar: 'a.png', description: '测试角色（静默路径夹具）' }];
+
+  /** 打开「随对话自动学习」（默认关）。 */
+  const armAuto = (page: Page) => page.getByRole('switch', { name: '随对话自动学习' }).click();
+
+  test('默认关：就算聊完一轮也不会有任何自动写入', async ({ page }) => {
+    const wb = stubWorldbook();
+    await stubBackend(page, wb, CHARS);
+    await stubChat(page);
+    await seedSession(page);
+    await seedActiveBook(page);
+    await page.goto('/');
+    await openLearning(page);
+    const copyName = await createCopy(page);
+
+    const sw = page.getByRole('switch', { name: '随对话自动学习' });
+    await expect(sw).toHaveAttribute('aria-checked', 'false');
+    await expect(page.getByText(/自动学习：关/)).toBeVisible();
+    // 没打开 → 面板不该出现「已就绪」字样
+    await expect(page.getByText(/自动学习已就绪/)).toHaveCount(0);
+
+    const before = wb.edits.filter((e) => e.name === copyName).length;
+    await sendOneTurn(page, '钟楼那边的消息传来了，银线的事恐怕和守夜人脱不了干系。');
+    await page.waitForTimeout(6000); // > 去抖窗口（4s）：真安排了去抖的话此刻必然已跑
+    expect(wb.edits.filter((e) => e.name === copyName), '关着时不得写副本').toHaveLength(before);
+    expect(wb.learned(copyName)).toHaveLength(0);
+    // 触发状态一个字都没落盘（连「跳过」都不该记 —— 准入第一关就没进）
+    expect(await readTrigger(page), '关着时不该产生任何自动学习记录').toBeNull();
+  });
+
+  test('打开后：一轮对话完成 → 后台跑一次并把产物写进副本（不需要点采纳）', async ({ page }) => {
+    const wb = stubWorldbook();
+    await stubBackend(page, wb, CHARS);
+    await stubChat(page);
+    // 6 会话 × 12 轮；触发会话 = 该角色最近那条（12 轮 ≥ 静默最小 2 轮）
+    await seedSession(page);
+    await seedActiveBook(page);
+    await page.goto('/');
+    await openLearning(page);
+    const copyName = await createCopy(page);
+    const srcBefore = JSON.stringify(wb.books.get(SOURCE));
+    const cloneEdits = wb.edits.filter((e) => e.name === copyName).length;
+    expect(wb.learned(copyName), '刚克隆出来的副本不含学习条目').toHaveLength(0);
+
+    await armAuto(page);
+    await expect(page.getByText(/自动学习已就绪/)).toBeVisible();
+
+    // 事件源：一轮对话完成（用户**没点**任何「采纳」）
+    await sendOneTurn(page, '钟楼那边的消息传来了，银线的事恐怕和守夜人脱不了干系，我们得去钟楼看看。');
+
+    await expect
+      .poll(() => wb.edits.filter((e) => e.name === copyName).length, { timeout: 25000 })
+      .toBeGreaterThan(cloneEdits);
+    const learned = wb.learned(copyName);
+    expect(learned.length, '后台学习应把产物写进副本').toBeGreaterThan(0);
+    for (const e of learned) {
+      expect(e.position, 'R-07：仍然只进尾缀').toBe(1);
+      expect(e.extensions?.static, '静态注入永久搁置').toBeUndefined();
+      expect(typeof e.extensions?.learnedId, '每条都带内容派生的 learnId').toBe('string');
+    }
+    // 「只增不改」在静默路径同样成立：用户手写的条目一字不动
+    expect(wb.manual(copyName).map((e) => e.content)).toEqual([MANUAL_CONTENT]);
+    // ★ 源书逐字节不变（静默路径与手动路径共用同一条写通道）
+    expect(JSON.stringify(wb.books.get(SOURCE)), '源书必须逐字节不变').toBe(srcBefore);
+
+    // 台账记了这些自动写入（= 每条都能单独撤销的依据）
+    const ledger = await readLedger(page);
+    const applied = ledger.decisions.filter((d: { action: string }) => d.action === 'applied');
+    expect(applied.length).toBeGreaterThan(0);
+    for (const d of applied) expect(d.target.book).toBe(copyName);
+
+    // 节流基线落盘（刷新不丢；否则「刷新」就能绕过 5 分钟节流）
+    const trigger = await readTrigger(page);
+    expect(trigger.auto).toBe(true);
+    expect(trigger.runs).toBeGreaterThan(0);
+    expect(trigger.writtenTotal).toBeGreaterThan(0);
+    expect(trigger.lastRunAt).toBeTruthy();
+    expect(trigger.lastSkip, '成功跑过之后不该留跳过原因').toBeNull();
+
+    // 面板复核：状态行给可观测数字，「只看学习产物」列出刚写进去的条目
+    await reopenLearning(page);
+    await expect(page.getByText(/自动学习：开 · 上次/)).toBeVisible();
+    await page.getByRole('switch', { name: '只看学习产物' }).click();
+    await expect(page.getByText(/· 学习产物/).first()).toBeVisible();
+  });
+
+  test('打字会取消待跑的去抖：这一轮不写，停下后再完成一轮才写', async ({ page }) => {
+    const wb = stubWorldbook();
+    await stubBackend(page, wb, CHARS);
+    await stubChat(page);
+    await seedSession(page);
+    await seedActiveBook(page);
+    await page.goto('/');
+    await openLearning(page);
+    const copyName = await createCopy(page);
+    const cloneEdits = wb.edits.filter((e) => e.name === copyName).length;
+    await armAuto(page);
+    await expect(page.getByText(/自动学习已就绪/)).toBeVisible();
+
+    // 第 1 轮完成 → 安排了一次去抖（4s 后跑）
+    await sendOneTurn(page, '钟楼那边的消息传来了。', 1);
+    // 去抖窗口内继续打字 → 取消这次待跑（LG-17：不和输入抢主线程）
+    await page.locator('textarea[aria-label="消息输入"]').fill('银线');
+    await page.waitForTimeout(6000); // 超过去抖窗口
+    expect(wb.edits.filter((e) => e.name === copyName), '打字取消后这一轮不得写').toHaveLength(cloneEdits);
+    expect(wb.learned(copyName)).toHaveLength(0);
+    // 记录里只有「开关已打开」这一件事：既没跑过、也没记过跳过（去抖是被取消的，不是跑了才发现不满足）
+    const cancelled = await readTrigger(page);
+    expect(cancelled.auto).toBe(true);
+    expect(cancelled.runs).toBe(0);
+    expect(cancelled.lastRunAt).toBeNull();
+    expect(cancelled.lastSkip, '被取消的去抖不该留下跳过原因').toBeNull();
+
+    // 停下后再完成一轮 → 重新安排去抖，这次不打断 → 真的写入
+    await sendOneTurn(page, '守夜人不会无缘无故出现在渡口。', 2);
+    await expect
+      .poll(() => wb.edits.filter((e) => e.name === copyName).length, { timeout: 25000 })
+      .toBeGreaterThan(cloneEdits);
+    expect(wb.learned(copyName).length).toBeGreaterThan(0);
+  });
+
+  test('副本不是启用书时：自动学习一项都不写，并显性说明会被跳过', async ({ page }) => {
+    const wb = stubWorldbook();
+    await stubBackend(page, wb, CHARS);
+    await stubChat(page);
+    await seedSession(page);
+    await seedActiveBook(page);
+    await page.goto('/');
+    await openLearning(page);
+    const copyName = await createCopy(page);
+    await armAuto(page);
+    // 切回源书 → 副本不再是启用书
+    await page.getByRole('button', { name: '切回源书' }).click();
+    await expect(page.getByText(/自动学习不会写任何地方/)).toBeVisible();
+    const editsBefore = wb.edits.length;
+
+    await sendOneTurn(page, '钟楼那边的消息传来了，银线的事和守夜人脱不了干系。');
+    await page.waitForTimeout(6000);
+    expect(wb.edits.length, '副本非启用书时静默路径必须一个字节都不写').toBe(editsBefore);
+    expect(wb.learned(copyName)).toHaveLength(0);
+    // 跳过原因**落盘且可读**（不出现「默默什么都没发生」）
+    const trigger = await readTrigger(page);
+    expect(trigger?.lastSkip?.kind).toBe('copyNotActive');
+    expect(trigger?.runs, '跳过不算跑过').toBe(0);
+    // 面板也把它说出来
+    await reopenLearning(page);
+    await expect(page.getByText(/自动学习不会写任何地方/)).toBeVisible();
+    await expect(page.getByText(/上次没跑的原因|当前会被跳过/)).toBeVisible();
   });
 });

@@ -51,7 +51,9 @@ import {
   digestOf,
   invariantReport,
   isAppliable,
+  learnedIdOfEntry,
   planRound,
+  rawEntriesOf,
   quotaStatusOf,
   rawCloneOf,
   removeAllLearned,
@@ -64,9 +66,23 @@ import {
   type QuotaStatus,
 } from './copy-core';
 import { readLocalSessions, scopeToCharacter, toCorpus } from './corpus';
+import {
+  advanceAfterRun,
+  advanceAfterSkip,
+  decideRun,
+  defaultTriggerState,
+  loadTriggerState,
+  pendingTurnsOf,
+  saveTriggerState,
+  silentLineOf,
+  SILENT_DEBOUNCE_MS,
+  withAuto,
+  type SilentTriggerState,
+} from './silent-trigger';
 import { UI_WINDOW_CAP, runProvisioning, type ProvisionSuggestions } from './provision/index.ts';
 import { worldbook } from '../../stores/worldbook.svelte';
 import { sessions } from '../../stores/sessions.svelte';
+import { logger } from '../logger';
 
 /** 浏览器存储；不可用时返回 null（隐私模式等），由 core 统一报错。 */
 function storageOrNull(): StorageLike | null {
@@ -85,8 +101,24 @@ export interface CopyState {
   delta: CopyDelta;
   /** 副本里学习条目总数 */
   learnedTotal: number;
+  /** 副本里的学习产物明细（「只看学习产物」数据源；只有这些条目是学习写的） */
+  learnedEntries: { learnedId: string; kind: string; content: string }[];
   /** 读回失败原因（null = 正常） */
   error: string | null;
+}
+
+/** 副本里的学习产物明细（按书目顺序；「只看学习产物」的**唯一**数据源）。 */
+function learnedEntriesOf(book: unknown): { learnedId: string; kind: string; content: string }[] {
+  const entries = rawEntriesOf(book);
+  if (!entries) return [];
+  const out: { learnedId: string; kind: string; content: string }[] = [];
+  for (const e of Object.values(entries)) {
+    const id = learnedIdOfEntry(e);
+    if (id === null) continue;
+    const kind = (e.extensions as { learnedKind?: unknown } | undefined)?.learnedKind;
+    out.push({ learnedId: id, kind: typeof kind === 'string' ? kind : 'other', content: String(e.content ?? '') });
+  }
+  return out;
 }
 
 class LearningGate {
@@ -115,8 +147,12 @@ class LearningGate {
   sandbox = $state<SandboxRecord | null>(null);
   /** 副本实时状态（配额 / 增量视图 / 学习条目数） */
   copyState = $state<CopyState | null>(null);
+  /** 静默触发状态（自动开关 + 节流基线 + 跳过记录）；默认关，需用户显式打开 */
+  trigger = $state<SilentTriggerState>(defaultTriggerState());
   /** 落盘请求进行中（UI 禁用按钮，避免重复写） */
   writing = $state(false);
+  /** 去抖计时器句柄（**不是**定时轮询：只有事件到了才存在） */
+  private pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 用户可读状态（空态 / 降态 / 失败态由 core 区分，R-11） */
   view = $derived<GateView>(gateView(this.run, this.ledger));
@@ -146,6 +182,12 @@ class LearningGate {
   delta = $derived<CopyDelta | null>(this.copyState?.delta ?? null);
   /** 配额状态（含显性暂停） */
   quota = $derived<QuotaStatus | null>(this.copyState?.quota ?? null);
+  /** 静默学习是否可用（开关打开 + 副本已启用；用于面板显隐与文案） */
+  silentArmed = $derived(this.trigger.auto && this.copyActive);
+  /** 面板脚注：自动学习状态一行（可观测项） */
+  silentLine = $derived(silentLineOf(this.trigger));
+  /** 上次**跳过**的显性原因（null = 无）——绝不出现「默默什么都没发生」 */
+  silentSkipNote = $derived(this.trigger.lastSkip?.reason ?? null);
 
   constructor() {
     this.enabled = isLearningEnabled();
@@ -153,7 +195,9 @@ class LearningGate {
     this.ledger = ledger;
     const sb = loadSandbox(storageOrNull());
     this.sandbox = sb.sandbox;
-    const first = error ?? sb.error;
+    const tr = loadTriggerState(storageOrNull());
+    this.trigger = tr.state;
+    const first = error ?? sb.error ?? tr.error;
     if (first) this.notice = first;
     if (this.sandbox) void this.refreshCopyState();
   }
@@ -313,6 +357,7 @@ class LearningGate {
         quota,
         delta: deltaVsSnapshot(sb.digest, null),
         learnedTotal: 0,
+        learnedEntries: [],
         error: raw.error ?? '读不到副本',
       };
       return;
@@ -323,6 +368,7 @@ class LearningGate {
       quota,
       delta: deltaVsSnapshot(sb.digest, raw.book),
       learnedTotal: quota.cluster + quota.template,
+      learnedEntries: learnedEntriesOf(raw.book),
       error: null,
     };
   }
@@ -373,6 +419,196 @@ class LearningGate {
     } catch (e) {
       this.run = { status: 'failed', message: e instanceof Error ? e.message : String(e) };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 静默触发（事件驱动去抖 + 节流基线 + 有界工作量；P7 / LG-13 / LG-16 / LG-17）
+  // -------------------------------------------------------------------------
+
+  /**
+   * 打开/关闭「自动学习」。
+   *
+   * **默认关**，且打开时必须已有可用副本（否则打开也只会每次跳过 → 显性拒绝并说明）。
+   * 关掉只停自动跑，**不删**任何已写入内容、**不切书**（与关 flag 同口径）。
+   */
+  setAutoLearn(on: boolean): void {
+    this.trigger = withAuto(this.trigger, on);
+    this.persistTrigger();
+    if (!on) this.cancelPending();
+    this.notice = on
+      ? '已开启自动学习：每轮对话结束后（去抖 + 节流）把新学到的产物**写进副本**；原书不动。'
+      : '已关闭自动学习；副本、台账与已写入的条目都保留。';
+  }
+
+  /** 用户开始打字 → **取消**本次去抖（不打断输入；LG-17）。 */
+  onTyping(): void {
+    this.cancelPending();
+  }
+
+  /**
+   * 一轮对话完成（**事件源**；不是定时器）。
+   *
+   * 只做两件事：取消上一次待跑的去抖、安排一次延迟检查。真正的准入判定在
+   * `decideRun()`（纯函数），所以「什么时候会写」有机器可读的答案。
+   */
+  onTurnComplete(sessionId?: string | null): void {
+    if (!this.trigger.auto) return;
+    this.cancelPending();
+    const id = sessionId ?? sessions.active?.id ?? null;
+    this.pendingTimer = setTimeout(() => {
+      this.pendingTimer = null;
+      void this.runSilent(id);
+    }, SILENT_DEBOUNCE_MS);
+  }
+
+  private cancelPending(): void {
+    if (this.pendingTimer !== null) {
+      clearTimeout(this.pendingTimer);
+      this.pendingTimer = null;
+    }
+  }
+
+  /**
+   * 跑一次静默学习（**写进副本**，与手动采纳共用同一条写通道）。
+   *
+   * 语料只取**触发会话**（`fallback:'none'`：拿不到角色就宁可不学，绝不跨角色混语料）。
+   * 任何一步不满足 → 记录 `lastSkip` 并**显性**说明；不写任何东西。
+   */
+  private async runSilent(sessionId: string | null): Promise<void> {
+    const now = new Date();
+    const all = ((): ReturnType<typeof readLocalSessions> | null => {
+      try {
+        return readLocalSessions(storageOrNull());
+      } catch {
+        return null; // 读不到语料 → 下面按 hasCorpus=false 跳过（显性）
+      }
+    })();
+    const target = sessionId ? all?.find((s) => s.id === sessionId) ?? null : null;
+    const totalTurns = target?.turns?.length ?? 0;
+    const decision = decideRun(this.trigger, {
+      now,
+      pendingTurns: target ? pendingTurnsOf(this.trigger, target.id, totalTurns) : 0,
+      hasCorpus: target !== null && toCorpus([target]).messages.length > 0,
+      hasSandbox: this.sandbox !== null,
+      copyActive: this.copyActive,
+      quotaPaused: this.quota?.paused ?? false,
+      writing: this.writing,
+    });
+    if (!decision.run) {
+      this.trigger = advanceAfterSkip(this.trigger, { now, decision });
+      this.persistTrigger();
+      return;
+    }
+
+    const scope = scopeToCharacter([target!], target!.characterName ?? null, 'none');
+    try {
+      const corpus = toCorpus(scope.sessions);
+      const windowed = applyWindow(corpus.messages, UI_WINDOW_CAP);
+      const provisions: ProvisionSuggestions = runProvisioning(windowed.messages, {
+        generatedAt: now.toISOString(),
+      });
+      const items = buildSuggestionList(provisions);
+
+      // 建议列表**合并**而不是覆盖：用户还没处理的旧条目不该被一次后台运行清掉
+      const seen = new Set(items.map((i) => i.uid));
+      this.items = [...items, ...this.pendingItems.filter((p) => !seen.has(p.uid))];
+      this.lastRunInfo = {
+        sessions: 1,
+        turns: corpus.meta.turns,
+        messages: windowed.messages.length,
+        droppedEmpty: corpus.meta.droppedEmpty,
+        character: scope.character,
+        allSessions: all?.length ?? 0,
+      };
+      this.run = { status: 'done', items: this.items };
+
+      const drafts: LearnedDraft[] = items
+        .filter((i) => isAppliable(i.kind))
+        .map((i) => ({ uid: i.uid, title: i.title, keys: i.keys ?? [], content: i.detail, kind: i.kind }));
+      const written = await this.writeSilent(drafts, now);
+
+      this.trigger = advanceAfterRun(this.trigger, {
+        now,
+        sessionId: target!.id,
+        totalTurns,
+        written,
+      });
+      this.persistTrigger();
+    } catch (e) {
+      // 失败**不静默**：留一行显性提示，但不打断聊天（不弹窗、不抛）
+      this.notice = `自动学习失败：${e instanceof Error ? e.message : String(e)}（未做任何写入）`;
+      logger.warn('learning', '静默学习失败', e);
+    }
+  }
+
+  /**
+   * 静默写入（**不是**新写通道：与 `writeToCopy` 同一套前置条件与不变量断言）。
+   *
+   * 与手动路径的差别只有两点：① 一次提交多条（仍未超过单轮配额）；② 结果写进
+   * notice 而不是等用户点按钮。返回**实际写入条数**（0 = 没有可写的）。
+   */
+  private async writeSilent(drafts: LearnedDraft[], now: Date): Promise<number> {
+    const sb = this.sandbox;
+    const guard = writesAllowed(sb, worldbook.activeName);
+    if (!guard.ok || !sb) {
+      this.notice = guard.reason;
+      return 0;
+    }
+    if (this.writing || drafts.length === 0) return 0;
+
+    this.writing = true;
+    try {
+      const raw = await worldbook.readRawBook(sb.copyName);
+      if (raw.book === null) {
+        this.notice = `读不到副本《${sb.copyName}》：${raw.error ?? '原因未知'}（未做任何写入）。`;
+        return 0;
+      }
+      const plan = planRound(raw.book, drafts);
+      if (plan.accepted.length === 0) {
+        if (plan.skip.duplicate > 0) {
+          this.notice = '自动学习：没有新内容（都已在副本里），本轮未写入。';
+        } else if (plan.skip.quotaFull > 0) {
+          this.notice = `${plan.status.reason ?? '配额已满'} —— 自动学习已暂停（不静默丢弃）。`;
+        }
+        await this.refreshCopyState();
+        return 0;
+      }
+      const app = appendLearned(raw.book, plan.accepted, now.toISOString());
+      if (app.book === null) {
+        this.notice = `副本《${sb.copyName}》的 entries 形态不合法，已拒绝写入。`;
+        return 0;
+      }
+      const violations = invariantReport(raw.book, app.book, { mode: 'append' });
+      if (violations.length > 0) {
+        this.notice = `自动学习写入被拒绝（会破坏「只增不改」）：${violations[0].detail}`;
+        return 0;
+      }
+      const saved = await worldbook.saveRawBook(sb.copyName, app.book);
+      if (!saved.ok) {
+        this.notice = `自动学习写入副本失败：${saved.error ?? '原因未知'}（本机记录未变更）。`;
+        return 0;
+      }
+
+      // 逐条记账（每条都能在面板里单独撤销）
+      for (const a of app.appended) {
+        const text = plan.accepted.find((d) => contentLearnedId(d.kind, d.keys, d.content) === a.learnedId)?.content ?? '';
+        this.commit(a.uid, 'applied', text, { book: sb.copyName, learnedId: a.learnedId });
+      }
+      const rest = plan.skip.total();
+      this.notice =
+        `自动学习：已写入副本《${sb.copyName}》${app.appended.length} 条（可在本页撤销）` +
+        (rest > 0 ? `；另有 ${rest} 条因重复/配额未写` : '') +
+        `${plan.status.paused ? `；${plan.status.reason}` : ''}`;
+      await this.refreshCopyState();
+      return app.appended.length;
+    } finally {
+      this.writing = false;
+    }
+  }
+
+  private persistTrigger(): void {
+    const err = saveTriggerState(storageOrNull(), this.trigger);
+    if (err) this.notice = err;
   }
 
   // -------------------------------------------------------------------------

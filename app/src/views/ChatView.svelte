@@ -18,6 +18,8 @@
   import { ctxConfig } from '../stores/context.svelte';
   import { worldbook } from '../stores/worldbook.svelte';
   import { sessions } from '../stores/sessions.svelte';
+  // 静默学习（M2）：只在事件点通知学习闸；学习闸自己判定是否真的跑
+  import { learningGate } from '../lib/learning/suggest-gate.svelte'; // [SSA-LEARN]
   import { groups } from '../stores/groups.svelte'; // [SSA-GROUP]
   import { advanceIdle, pickSpeaker } from '../lib/group-speaker'; // [SSA-GROUP]
   import type { GroupReply, GroupSessionRecord } from '../lib/group-session-codec'; // [SSA-GROUP]
@@ -678,6 +680,8 @@
         stats: replyStats,
       });
       pending = null;
+      // 一轮落盘 = 静默学习的**事件源**（不是定时器）；是否真的跑由学习闸判定
+      learningGate.onTurnComplete(sessions.active?.id ?? null);
 
       logger.debug('chat', '本轮完成', {
         chars: finalText.length,
@@ -768,10 +772,17 @@
   }
 
   function onKeydown(e: KeyboardEvent) {
+    // 打字即取消待跑的静默学习去抖（LG-17：不让后台学习在主线程上和输入抢时间）
+    learningGate.onTyping();
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       send();
     }
+  }
+
+  /** 输入框任何改动都算「用户在场」→ 取消本次去抖（不打断输入）。 */
+  function onInput() {
+    learningGate.onTyping();
   }
 
   onMount(() => {
@@ -1096,6 +1107,7 @@
       class="composer-input"
       bind:value={draft}
       onkeydown={onKeydown}
+      oninput={onInput}
       placeholder={generating ? '正在回复…' : service === 'ready' ? '说点什么…' : '正在准备…'}
       disabled={service !== 'ready'}
       rows="1"

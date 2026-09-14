@@ -19,6 +19,7 @@
   import { onMount } from 'svelte';
   import { learningGate } from '../../lib/learning/suggest-gate.svelte';
   import { isAppliable } from '../../lib/learning/copy-core';
+  import { SILENT_TURN_BUDGET } from '../../lib/learning/silent-trigger';
   import { KIND_LABEL, type SuggestionItem } from '../../lib/learning/gate-core';
   import { worldbook } from '../../stores/worldbook.svelte';
 
@@ -30,6 +31,8 @@
   /** 编辑中的条目 uid（null = 无） */
   let editingUid = $state<string | null>(null);
   let draft = $state('');
+  /** 「只看学习产物」过滤开关（三入口之一；纯显示，不改任何数据） */
+  let showLearned = $state(false);
 
   const view = $derived(learningGate.view);
   const sandbox = $derived(learningGate.sandbox);
@@ -170,6 +173,26 @@
           {/if}
         {/if}
 
+        <!-- 只看学习产物：把「学习写的」与「你自己写的」分开看（三入口之一） -->
+        {#if copyState && copyState.learnedEntries.length > 0}
+          <SettingRow
+            kind="toggle"
+            label="只看学习产物"
+            desc="下面是副本里由学习写进去的全部条目；你手写/手改的条目不在其中"
+            checked={showLearned}
+            onchange={() => (showLearned = !showLearned)}
+          />
+          {#if showLearned}
+            {#each copyState.learnedEntries as le (le.learnedId)}
+              <SettingRow
+                label={le.content.slice(0, 60)}
+                desc={`${KIND_LABEL[le.kind as SuggestionItem['kind']] ?? le.kind} · 学习产物`}
+                stacked
+              />
+            {/each}
+          {/if}
+        {/if}
+
         <SettingRow
           label="整体回滚"
           desc="摘除副本里全部学习条目（你手写/手改的条目不动）；「学歪了」时一键复原"
@@ -191,6 +214,38 @@
     <!-- 配额触顶：显性暂停横幅（禁静默丢弃，spec §10 / LG-16） -->
     {#if quota?.paused}
       <p class="banner">⏸ {quota.reason}</p>
+    {/if}
+
+    <!-- 自动学习（静默路径）：默认关，需显式打开；产物同样只写副本 -->
+    <SettingGroup title="自动学习">
+      <SettingRow
+        kind="toggle"
+        label="随对话自动学习"
+        desc="每轮对话结束后在后台跑一次（去抖 + 节流），把新学到的产物直接写进副本；原书不动"
+        checked={learningGate.trigger.auto}
+        onchange={(v) => learningGate.setAutoLearn(v)}
+      />
+      <SettingRow label="状态" value={learningGate.silentLine} stacked />
+      {#if learningGate.trigger.auto && !learningGate.copyActive}
+        <SettingRow
+          label="当前会被跳过"
+          value="副本不是启用的世界书 —— 自动学习不会写任何地方"
+          desc="点上面沙盒区的「启用副本」即可恢复；或关掉自动学习"
+          stacked
+        />
+      {:else if learningGate.silentSkipNote}
+        <SettingRow label="上次没跑的原因" value={learningGate.silentSkipNote} stacked />
+      {/if}
+      <SettingRow
+        label="它的边界"
+        desc={`只学触发那一轮所属角色的会话（拿不到角色就不学）；单次最多 ${SILENT_TURN_BUDGET} 轮，积压多了会提示你手动学；
+写的范围与「采纳」完全一致（同一套配额与不变量检查），每条都能在下面单独撤销`}
+        stacked
+      />
+    </SettingGroup>
+
+    {#if learningGate.trigger.auto && learningGate.silentArmed}
+      <p class="hint">自动学习已就绪：继续聊下去即可，产物会写进《{sandbox?.copyName ?? ''}》。</p>
     {/if}
 
     <SettingGroup title="语料">
