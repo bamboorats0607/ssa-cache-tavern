@@ -1,14 +1,16 @@
 <script lang="ts">
   /**
-   * 学习建议页（B' 面板 + Phase 4 落盘，spec T3.2 / T4.1）。// [SSA-LEARN]
+   * 学习建议页（沙盒面板；spec §10 / T3.2）。// [SSA-LEARN]
    *
    * ── 形态纪律 ──────────────────────────────────────────────────────────────
-   * · **列表 + 应用/拒绝/编辑**，不是数值面板（R-08）：θ / minFreq / window /
+   * · **列表 + 采纳/拒绝/编辑**，不是数值面板（R-08）：θ / minFreq / window /
    *   置信度数字一律不显示；每条只给「哪一类 / 来自哪条通道 / 正文」。
-   * · 零建议空态、后端/存储降级态、运行中态**都内联渲染**，不用弹窗（R-11）。
-   * · 「采纳」= **真的写进你选定的世界书**（Phase 4 / C-07：只走 saveEntries）；
-   *   写入失败会当场说明且不改本机记录（R8）；已写入的条目在本页可**显式撤销**。
-   * · 观测性产物（场景触发 / 词对耦合 / 名称归并）没有可注入正文 → 不给「采纳」按钮，
+   *   （唯一例外：**配额余量**是 spec §10 明令的可观测项。）
+   * · 零建议空态、降级态、运行中态**都内联渲染**，不用弹窗（R-11）。
+   * · 「采纳」= 真的写进**学习副本**（C-06：写入范围 ⊆ {副本}）；写入失败当场说明
+   *   且不改本机记录（R8）；已写入的条目在本页可**显式撤销**或**一键整体回滚**。
+   * · 配额触顶 → **显性暂停横幅**（禁静默丢弃）。
+   * · 观测性产物（场景触发 / 词对耦合 / 名称归并）没有可注入正文 → 不给「采纳」，
    *   只显示为参考（避免「采纳了却什么都没发生」）。
    */
   import SubPage from '../../lib/settings/SubPage.svelte';
@@ -16,7 +18,7 @@
   import SettingRow from '../../lib/settings/SettingRow.svelte';
   import { onMount } from 'svelte';
   import { learningGate } from '../../lib/learning/suggest-gate.svelte';
-  import { isAppliable } from '../../lib/learning/apply-core';
+  import { isAppliable } from '../../lib/learning/copy-core';
   import { KIND_LABEL, type SuggestionItem } from '../../lib/learning/gate-core';
   import { worldbook } from '../../stores/worldbook.svelte';
 
@@ -30,16 +32,15 @@
   let draft = $state('');
 
   const view = $derived(learningGate.view);
+  const sandbox = $derived(learningGate.sandbox);
+  const copyState = $derived(learningGate.copyState);
+  const quota = $derived(learningGate.quota);
+  const delta = $derived(learningGate.delta);
 
-  // 拉一次世界书列表（目标书下拉的数据源）；失败不阻塞本页（降级后端没有该接口）
+  // 拉一次世界书列表（沙盒要克隆「当前启用」的书）；失败不阻塞本页（降级后端没有该接口）
   onMount(() => {
     if (!worldbook.loaded) void worldbook.load();
   });
-
-  function onPickBook(e: Event) {
-    const v = (e.currentTarget as HTMLSelectElement).value;
-    learningGate.setTargetBook(v || null);
-  }
 
   function startEdit(it: SuggestionItem) {
     editingUid = it.uid;
@@ -56,46 +57,141 @@
 
 <SubPage title="学习建议" {onBack}>
   <div class="stack">
-    <!-- 边界声明：产物不会自动生效，写入必须逐条确认（C-06 / C-07 / R-02） -->
+    <!-- 边界声明：产物只进副本，原书自克隆起不进写入路径（C-06 / R-02 / spec §10） -->
     <p class="boundary">
-      学习产物<strong>不会</strong>自动生效，也不会自动写进世界书：这里逐条确认，
-      只有你点「采纳」的那几条会被写入下面选定的世界书，且随时可以撤销。
-      关掉学习开关<strong>不会</strong>删除已写入的条目。
+      学习产物<strong>只写进学习副本</strong>：点下面的按钮会把你当前启用的世界书
+      <strong>原样复制</strong>一份（含本 App 不认识的字段），此后所有产物都只落进副本，
+      <strong>原书</strong>自克隆那一刻起不再被改动。副本可整体回滚、可删除、可随时切回源书；
+      关掉学习开关<strong>不会</strong>删除副本里的条目。
     </p>
 
-    <SettingGroup title="写入目标">
-      <SettingRow
-        label="世界书"
-        desc="采纳的建议写进这本书；建议用一本专用书，避免与你自己写的条目混在一起"
-        stacked
-      >
-        {#snippet trailing()}
-          <div class="actions">
-            <select
-              class="pick"
-              aria-label="选择目标世界书"
-              value={learningGate.targetBook ?? ''}
-              onchange={onPickBook}
-            >
-              <option value="">（未选择）</option>
-              {#each worldbook.list as w (w.fileId)}
-                <option value={w.name}>{w.name}</option>
-              {/each}
-              {#if learningGate.targetBook && !worldbook.list.some((w) => w.name === learningGate.targetBook)}
-                <option value={learningGate.targetBook}>{learningGate.targetBook}</option>
+    {#if worldbook.activationNote}
+      <p class="hint err">{worldbook.activationNote}</p>
+    {/if}
+
+    <SettingGroup title="学习副本（沙盒）">
+      {#if !sandbox}
+        <SettingRow
+          label="创建并启用副本"
+          desc="把当前启用的世界书原样复制一份作为副本，并把副本设为启用书；学习只写它"
+          stacked
+        >
+          {#snippet trailing()}
+            <div class="actions">
+              <button
+                class="btn btn-accent"
+                disabled={learningGate.writing || !worldbook.activeName}
+                onclick={() => learningGate.enableSandbox()}
+              >
+                创建并启用副本
+              </button>
+              <button class="btn" onclick={() => void worldbook.load(true)}>刷新书单</button>
+            </div>
+            <p class="hint">
+              {worldbook.activeName
+                ? `将以《${worldbook.activeName}》为源书创建副本（副本名 = 源书名 + 「·学习副本」）。`
+                : '当前没有启用的世界书——先在世界书页启用一本，再回来创建副本。'}
+            </p>
+            {#if worldbook.lastError}
+              <p class="hint err">世界书列表读取失败：{worldbook.lastError}</p>
+            {/if}
+          {/snippet}
+        </SettingRow>
+      {:else}
+        <SettingRow
+          label={`副本《${sandbox.copyName}》`}
+          value={learningGate.copyActive ? '已启用' : '未启用'}
+          desc={`源书《${sandbox.sourceName}》· 克隆基线：${
+            sandbox.clonedAt ? sandbox.clonedAt.replace('T', ' ').slice(0, 16) : '未记录'
+          }`}
+          stacked
+        >
+          {#snippet trailing()}
+            <div class="actions">
+              {#if !learningGate.copyActive}
+                <button
+                  class="btn btn-accent"
+                  disabled={learningGate.writing}
+                  onclick={() => learningGate.activateCopy()}
+                >
+                  启用副本
+                </button>
               {/if}
-            </select>
+              <button
+                class="btn"
+                disabled={learningGate.writing}
+                onclick={() => learningGate.switchBackToSource()}
+              >
+                切回源书
+              </button>
+              <button
+                class="btn"
+                disabled={learningGate.writing}
+                onclick={() => learningGate.refreshCopyState()}
+              >
+                刷新状态
+              </button>
+              <button
+                class="btn"
+                disabled={learningGate.writing}
+                onclick={() => learningGate.deleteCopy()}
+              >
+                删除副本
+              </button>
+            </div>
+            {#if !learningGate.copyActive}
+              <p class="hint warn">
+                副本<strong>不是</strong>当前启用的世界书——此时写副本会被拒绝（会写进一本不被注入的书）。
+                点「启用副本」切过去，或「切回源书」回到原书。
+              </p>
+            {/if}
+          {/snippet}
+        </SettingRow>
+
+        {#if copyState?.error}
+          <SettingRow label="副本状态" value={`读取失败：${copyState.error}`} stacked />
+        {:else if quota}
+          <SettingRow
+            label="配额余量"
+            value={`候选簇 ${quota.cluster}/${quota.limitCluster} · 模板行 ${quota.template}/${quota.limitTemplate}`}
+            desc="触顶会显性暂停写入，不会静默丢弃"
+          />
+          {#if copyState}
+            <SettingRow label="副本里的学习条目" value={`${copyState.learnedTotal} 条`} />
+          {/if}
+          {#if delta}
+            <SettingRow
+              label="相对克隆快照的增量"
+              value={`学习追加 ${delta.addedByLearning} · 你手增 ${delta.addedByUser} · 手改 ${delta.edited} · 删除 ${delta.removed}${
+                delta.renumbered ? ` · 重编号 ${delta.renumbered}` : ''
+              }`}
+              stacked
+            />
+          {/if}
+        {/if}
+
+        <SettingRow
+          label="整体回滚"
+          desc="摘除副本里全部学习条目（你手写/手改的条目不动）；「学歪了」时一键复原"
+          stacked
+        >
+          {#snippet trailing()}
             <button
               class="btn"
-              disabled={learningGate.writing}
-              onclick={() => learningGate.createTargetBook()}
+              disabled={learningGate.writing || !learningGate.copyActive || !copyState}
+              onclick={() => learningGate.rollbackAll()}
             >
-              新建专用世界书
+              整体回滚
             </button>
-          </div>
-        {/snippet}
-      </SettingRow>
+          {/snippet}
+        </SettingRow>
+      {/if}
     </SettingGroup>
+
+    <!-- 配额触顶：显性暂停横幅（禁静默丢弃，spec §10 / LG-16） -->
+    {#if quota?.paused}
+      <p class="banner">⏸ {quota.reason}</p>
+    {/if}
 
     <SettingGroup title="语料">
       <SettingRow
@@ -122,6 +218,15 @@
         <SettingRow
           label="上次学习来源"
           value={`${learningGate.lastRunInfo.sessions} 个对话 · ${learningGate.lastRunInfo.turns} 轮 · ${learningGate.lastRunInfo.messages} 条语料`}
+          desc={`${
+            learningGate.lastRunInfo.character
+              ? `只学《${learningGate.lastRunInfo.character}》的会话（其它角色的语料不参与）`
+              : '没有正在进行的会话，本次学的是本机全部单角色会话'
+          }（本机共 ${learningGate.lastRunInfo.allSessions} 个对话）${
+            learningGate.lastRunInfo.droppedEmpty
+              ? ` · 跳过 ${learningGate.lastRunInfo.droppedEmpty} 轮空文本`
+              : ''
+          }`}
           stacked
         />
       {/if}
@@ -194,11 +299,15 @@
       <p class="hint">{learningGate.notice}</p>
     {/if}
 
-    <!-- 已落盘区：撤销是**显式动作**（M3 / C-08：关 flag 不会删这些条目） -->
+    <!-- 已落盘区：撤销是**显式动作**（C-08：关 flag 不会删这些条目） -->
     {#if learningGate.applied.length > 0}
-      <SettingGroup title={`已写入世界书 · ${learningGate.applied.length} 条`}>
+      <SettingGroup title={`已写入副本 · ${learningGate.applied.length} 条`}>
         {#each learningGate.applied as a (a.uid)}
-          <SettingRow label={a.text.slice(0, 60)} desc={`《${a.target.book}》· 撤销即从该书移除`} stacked>
+          <SettingRow
+            label={a.text.slice(0, 60)}
+            desc={`《${a.target.book}》· 撤销即从该书摘除这一条`}
+            stacked
+          >
             {#snippet trailing()}
               <button
                 class="btn"
@@ -247,6 +356,21 @@
   .hint.err {
     color: var(--danger);
   }
+  .hint.warn {
+    color: var(--text);
+    padding: 0;
+  }
+  /* 配额触顶横幅：比 hint 更显眼，避免「以为还在学、其实早就没写」 */
+  .banner {
+    margin: 0;
+    padding: var(--gap-md) var(--gap-lg);
+    border-radius: var(--radius-2xl);
+    border: 1px solid var(--danger);
+    background: var(--neutral-1);
+    font-size: 0.76rem;
+    line-height: 1.6;
+    color: var(--danger);
+  }
   .edit {
     flex: 1;
     min-width: 0;
@@ -261,18 +385,6 @@
   }
   .edit:focus {
     border-color: var(--accent-border);
-  }
-  .pick {
-    flex: 1;
-    min-width: 0;
-    padding: 6px 10px;
-    border-radius: var(--radius-md);
-    border: 1px solid var(--glass-border);
-    background: var(--input-bg);
-    color: var(--text);
-    font-family: inherit;
-    font-size: 0.82rem;
-    outline: none;
   }
   .tag {
     align-self: center;

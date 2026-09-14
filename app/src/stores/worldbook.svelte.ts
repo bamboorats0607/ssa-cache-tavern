@@ -42,6 +42,19 @@ class WorldbookStore {
   /** 当前激活的世界书名（null = 不启用世界书） */
   activeName = $state<string | null>(null);
   /**
+   * 若当前激活的是**学习副本**，这里是它的源书（原书）名；否则 null。// [SSA-LEARN]
+   *
+   * 用途：① 「关掉学习后安全切回原书」的依据；② 副本被删（僵尸副本）时的回退目标；
+   * ③ 撤销/回滚审计。**不是**角色绑定，只是「这本书从哪来」的溯源记录。
+   */
+  sourceName = $state<string | null>(null);
+  /**
+   * 激活路径的**显性**提示（成功切书 / 失败保持原书 / 僵尸副本回退）。// [SSA-LEARN]
+   *
+   * 与 `lastError`（仅日志）分离：这条是**给用户看的**（R-11：不得静默退化）。
+   */
+  activationNote = $state<string | null>(null);
+  /**
    * 当前激活世界书的条目（已归一化为内核的 WorldInfoEntry）。
    * 注意：这里保存的是**原版语义**条目；活簇转换在组装时按需进行（有记忆化缓存）。
    */
@@ -58,7 +71,11 @@ class WorldbookStore {
   constructor() {
     try {
       const saved = localStorage.getItem(KEY);
-      if (saved) this.activeName = JSON.parse(saved).activeName ?? null;
+      if (saved) {
+        const o = JSON.parse(saved) as { activeName?: unknown; sourceName?: unknown };
+        this.activeName = typeof o.activeName === 'string' ? o.activeName : null;
+        this.sourceName = typeof o.sourceName === 'string' ? o.sourceName : null;
+      }
     } catch {
       /* 静默 */
     }
@@ -89,9 +106,24 @@ class WorldbookStore {
       }));
       logger.info('worldbook', '世界书列表已加载', { count: this.list.length });
 
-      // 若已选中的世界书仍存在，加载其内容
+      // 若已选中的世界书仍存在，加载其内容（**保持** sourceName：刷新不该洗掉副本溯源）
       if (this.activeName && this.list.some((w) => w.name === this.activeName)) {
-        await this.select(this.activeName);
+        await this.activate(this.activeName, { source: this.sourceName });
+      } else if (this.activeName && !this.list.some((w) => w.name === this.activeName)) {
+        // 僵尸副本回退（P3）：激活的书已不在列表里。若是副本且源书还在 → 安全切回源书；
+        // 否则**不动**（保持原状并显性说明），绝不静默清空。
+        const zombie = this.activeName;
+        const src = this.sourceName;
+        if (src && this.list.some((w) => w.name === src)) {
+          const r = await this.activate(src, { source: null });
+          this.activationNote = r.ok
+            ? `《${zombie}》已不在，已安全切回源书《${src}》。`
+            : `《${zombie}》已不在，切回《${src}》也失败了：${r.error ?? '原因未知'}。`;
+          logger.warn('worldbook', '僵尸副本回退', { zombie, source: src, ok: r.ok });
+        } else {
+          this.activationNote = `当前启用的《${zombie}》已不在后端（可能被删除）。世界书内容仍按上次读到的版本注入。`;
+          logger.warn('worldbook', '激活的世界书已不存在', { zombie });
+        }
       }
     } catch (e) {
       logger.debug('worldbook', '世界书列表拉取失败', e);
@@ -101,15 +133,69 @@ class WorldbookStore {
     }
   }
 
-  /** 选择某个世界书并加载其条目；传 null 表示停用。 */
-  async select(name: string | null) {
-    this.activeName = name;
-    this.persist();
+  /**
+   * 选择某个世界书并加载其条目；传 null 表示停用。
+   *
+   * **安全语义（P3）**：切名只发生在**拉取成功之后**；失败保持原书激活并显性报错，
+   * **绝不**把 `entries` 清空（旧行为会静默退化成「仅角色设定」，而持久化的
+   * `activeName` 已指向一本读不到的书）。手动选择同样走这条路。
+   */
+  async select(name: string | null): Promise<{ ok: boolean; error: string | null }> {
+    return this.activate(name, { source: null });
+  }
+
+  /**
+   * 安全激活（[SSA-LEARN] 副本沙盒的落点）。
+   *
+   * `opts.source`：新激活书的「源书名」（学习副本传原书）；`undefined` = **保持现值**
+   * （供 `load()` 刷新使用）。
+   */
+  async activate(
+    name: string | null,
+    opts: { source?: string | null } = {},
+  ): Promise<{ ok: boolean; error: string | null }> {
+    const nextSource = opts.source === undefined ? this.sourceName : opts.source;
+
     if (!name) {
+      // 显式停用：用户的明确动作，允许清空
+      this.activeName = null;
+      this.sourceName = null;
       this.entries = [];
+      this.persist();
+      this.activationNote = null;
       logger.info('worldbook', '已停用世界书');
-      return;
+      return { ok: true, error: null };
     }
+
+    const res = await this.readRawBook(name);
+    if (res.error !== null || res.book === null) {
+      const error = res.error ?? '世界书内容不可用';
+      this.lastError = error;
+      this.activationNote = `未能启用《${name}》：${error}；已保持《${this.activeName ?? '（无）'}》不变。`;
+      logger.warn('worldbook', '世界书激活失败（保持原书）', { name, error });
+      return { ok: false, error };
+    }
+
+    this.activeName = name;
+    this.sourceName = nextSource;
+    this.entries = parseWorldbook(res.book);
+    this.persist();
+    this.activationNote = null;
+    logger.info('worldbook', '世界书已加载', { name, entries: this.entries.length });
+    return { ok: true, error: null };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 原样通道（[SSA-LEARN] 副本沙盒）——**不经内核归一化**，字段全集透传
+  //
+  // 为什么必须有它：`readEntries` / `saveEntries` 走 `parseWorldbook` /
+  // `toWorldbookData` 的 11 字段映射，写回时会按下标重编号 uid 并丢掉 App 不认识的
+  // 字段。对「只增不改」的副本沙盒那是致命的——会把**未改动**条目变成已改动。
+  // 故沙盒只走这两个方法；错误一律随返回值**局部化**（P4：不写共享错误位）。
+  // ---------------------------------------------------------------------------
+
+  /** 取回原始 JSON。 */
+  async readRawBook(name: string): Promise<{ book: unknown | null; error: string | null }> {
     try {
       const res = await fetch(`${getBaseUrl()}/api/worldinfo/get`, {
         method: 'POST',
@@ -117,19 +203,27 @@ class WorldbookStore {
         body: JSON.stringify({ name }),
         signal: AbortSignal.timeout(10000),
       });
-      if (!res.ok) {
-        this.entries = [];
-        this.lastError = `世界书加载失败（${res.status}）`;
-        logger.warn('worldbook', '世界书内容不可用', { name, status: res.status });
-        return;
-      }
-      const book = await res.json();
-      this.entries = parseWorldbook(book);
-      logger.info('worldbook', '世界书已加载', { name, entries: this.entries.length });
+      if (!res.ok) return { book: null, error: this.readWriteError(res.status) };
+      return { book: await res.json(), error: null };
     } catch (e) {
-      this.entries = [];
-      this.lastError = e instanceof Error ? e.message : String(e);
-      logger.warn('worldbook', '世界书加载异常', e);
+      return { book: null, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** 原样写回（失败原因随返回值返回）。 */
+  async saveRawBook(name: string, book: unknown): Promise<{ ok: boolean; error: string | null }> {
+    this.writing = true;
+    try {
+      const res = await this.postWrite('/api/worldinfo/edit', { name, data: book });
+      if (!res.ok) return { ok: false, error: this.readWriteError(res.status) };
+      // 写的是**当前激活**的书 → 同步刷新内存条目；否则下一轮组装还在用旧内容
+      if (this.activeName === name) this.entries = parseWorldbook(book);
+      logger.info('worldbook', '世界书已原样写回', { name });
+      return { ok: true, error: null };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      this.writing = false;
     }
   }
 
@@ -266,6 +360,7 @@ class WorldbookStore {
       }
       if (this.activeName === name) {
         this.activeName = null;
+        this.sourceName = null;
         this.entries = [];
         this.persist();
       }
@@ -321,8 +416,10 @@ class WorldbookStore {
         return false;
       }
       const wasActive = this.activeName === oldName;
+      const keepSource = this.sourceName;
       await this.load(true);
-      if (wasActive) await this.select(trimmed);
+      // 重命名后重新激活：**保持**副本溯源（改名不该让「从哪来」丢失）
+      if (wasActive) await this.activate(trimmed, { source: keepSource });
       logger.info('worldbook', '世界书已重命名', { oldName, newName: trimmed });
       return true;
     } catch (e) {
@@ -336,7 +433,7 @@ class WorldbookStore {
 
   private persist() {
     try {
-      localStorage.setItem(KEY, JSON.stringify({ activeName: this.activeName }));
+      localStorage.setItem(KEY, JSON.stringify({ activeName: this.activeName, sourceName: this.sourceName }));
     } catch {
       /* 静默 */
     }
@@ -345,6 +442,8 @@ class WorldbookStore {
   reset() {
     this.list = [];
     this.activeName = null;
+    this.sourceName = null;
+    this.activationNote = null;
     this.entries = [];
     this.loaded = false;
     this.lastError = null;

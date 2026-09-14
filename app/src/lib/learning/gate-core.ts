@@ -26,7 +26,7 @@ import type { ProvisionSuggestions } from './provision/index.ts';
 
 export type SuggestionKind = 'cluster' | 'template' | 'scene' | 'coupling' | 'normalization';
 
-/** 列表项预带的触发词个数上限（落盘时 `apply-core` 会再截一次，口径唯一）。 */
+/** 列表项预带的触发词个数上限（落盘时 `copy-core` 会再截一次，口径唯一）。 */
 export const LEARNED_KEY_HINT = 6;
 
 export const KIND_LABEL: Record<SuggestionKind, string> = {
@@ -225,6 +225,26 @@ export function liveTargetOf(ledger: Ledger, uid: string): Decision | undefined 
 /** 该 uid 的落盘去向（撤销时读它，不另存一份真相）。 */
 export function targetOf(ledger: Ledger, uid: string): LearnedTarget | undefined {
   return liveTargetOf(ledger, uid)?.target;
+}
+
+/**
+ * 某 uid 的**全部**落盘去向（去重，按 `learnedId`）。
+ *
+ * 为什么不止一个：`learnedId` 是内容派生的 ⇒ 用户「编辑后采纳」会**追加**一条
+ * 新条目（旧条目按「只增不改」保留）。撤销必须把它们**都**摘掉，否则会留下孤儿。
+ */
+export function targetsOf(ledger: Ledger, uid: string): LearnedTarget[] {
+  const seen = new Set<string>();
+  const out: LearnedTarget[] = [];
+  for (let i = ledger.decisions.length - 1; i >= 0; i--) {
+    const d = ledger.decisions[i];
+    if (d.uid !== uid || !d.target) continue;
+    if (d.action !== 'applied' && d.action !== 'edited') continue;
+    if (seen.has(d.target.learnedId)) continue;
+    seen.add(d.target.learnedId);
+    out.push(d.target);
+  }
+  return out;
 }
 
 /** 当前**仍在世界书里**的已应用条目（撤销过的已摘除，不在其中）。 */
@@ -433,18 +453,80 @@ export function saveLedger(storage: StorageLike | null, ledger: Ledger): string 
 
 export const CORPUS_SESSION_KEY = 'tavern.sessions';
 
-/** 落盘目标世界书的选择（Phase 4；只存书名，正文走后端世界书接口）。 */
-export const TARGET_BOOK_KEY = 'tavern.learning.targetBook';
+/**
+ * 学习副本沙盒记录（Phase 4'：[SSA-LEARN] 沙盒化的落点）。
+ *
+ * 只存**关于副本的元信息**（哪本、从哪来、克隆时刻、克隆快照摘要），
+ * 副本正文在后端世界书里，**不进 localStorage**。
+ */
+export const SANDBOX_KEY = 'tavern.learning.sandbox';
+
+export interface SandboxRecord {
+  v: 1;
+  /** 副本名（学习产物**只允许**写它） */
+  copyName: string;
+  /** 源书名（原书；副本被删时安全切回的目标） */
+  sourceName: string;
+  /** 克隆时刻（ISO；由调用方注入，保证可确定性测试） */
+  clonedAt: string | null;
+  /** 克隆快照摘要（非学习条目的字节哈希）——增量视图的基线 */
+  digest: import('./copy-core.ts').CopyDigest;
+}
+
+/** 读沙盒记录：任何异常都**不抛**（沙盒坏了不能连累设置页），但要**报**。 */
+export function loadSandbox(storage: StorageLike | null): { sandbox: SandboxRecord | null; error: string | null } {
+  if (!storage) return { sandbox: null, error: null };
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(SANDBOX_KEY);
+  } catch (e) {
+    return { sandbox: null, error: `读取学习副本记录失败：${String(e)}` };
+  }
+  if (!raw) return { sandbox: null, error: null };
+  try {
+    const o = JSON.parse(raw) as Partial<SandboxRecord>;
+    if (o?.v !== 1) throw new Error(`版本不符（${String(o?.v)}）`);
+    if (typeof o.copyName !== 'string' || typeof o.sourceName !== 'string') throw new Error('缺少副本名/源书名');
+    const d = o.digest;
+    if (!d || typeof d !== 'object' || typeof (d as { byUid?: unknown }).byUid !== 'object') {
+      throw new Error('缺少克隆快照摘要');
+    }
+    return {
+      sandbox: {
+        v: 1,
+        copyName: o.copyName,
+        sourceName: o.sourceName,
+        clonedAt: typeof o.clonedAt === 'string' ? o.clonedAt : null,
+        digest: d as SandboxRecord['digest'],
+      },
+      error: null,
+    };
+  } catch (e) {
+    return { sandbox: null, error: `学习副本记录已损坏，已按「未启用沙盒」继续：${String(e)}` };
+  }
+}
+
+/** 写沙盒记录：失败必须显性（返回错误文本而不是吞掉）。 */
+export function saveSandbox(storage: StorageLike | null, rec: SandboxRecord | null): string | null {
+  if (!storage) return '本机存储不可用，学习副本记录未保存';
+  try {
+    if (rec === null) storage.removeItem(SANDBOX_KEY);
+    else storage.setItem(SANDBOX_KEY, JSON.stringify(rec));
+    return null;
+  } catch (e) {
+    return `学习副本记录写入失败（可能已满）：${String(e)}`;
+  }
+}
 
 /** 门禁用：学习路径**允许**读取的键（白名单）。群聊键不在其中。 */
-export const LEARNING_READ_KEYS = [CORPUS_SESSION_KEY, TARGET_BOOK_KEY] as const;
+export const LEARNING_READ_KEYS = [CORPUS_SESSION_KEY, SANDBOX_KEY] as const;
 
 /**
  * 门禁用：学习路径**允许**写入的键（白名单）。
- * 注意：世界书正文**不写 localStorage**，而是经 `worldbook.saveEntries()`
- * 走后端 `/api/worldinfo/edit`（与「世界书」页同一条路径，R-13 无文件导入）。
+ * 注意：世界书正文（含副本）**不写 localStorage**，而是经 `worldbook.saveRawBook()`
+ * 走后端 `/api/worldinfo/edit`（R-13 无文件导入；C-10 不新增端口/进程）。
  */
-export const LEARNING_WRITE_KEYS = [LEDGER_KEY, TARGET_BOOK_KEY] as const;
+export const LEARNING_WRITE_KEYS = [LEDGER_KEY, SANDBOX_KEY] as const;
 
 /**
  * 裁剪语料到窗口上限（T2.3 的主线程预算）。

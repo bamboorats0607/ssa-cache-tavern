@@ -21,6 +21,7 @@
  */
 
 import type { ChatSession, StoredTurn } from '../chat-sessions.ts';
+import { normalizeSessions } from '../chat-sessions.ts';
 
 /** 用户行固定名（四通道只需一个稳定标识，与 ST 语料惯例一致）。 */
 export const CORPUS_USER_NAME = '(user)';
@@ -185,3 +186,85 @@ export function isUsableText(text: string): boolean {
 
 /** 类型占位：`StoredTurn` 仅用于文档化映射来源，避免未使用导入告警。 */
 export type CorpusSourceTurn = StoredTurn;
+
+// ---------------------------------------------------------------------------
+// 语料读取与**角色限定**（P7 / LG-15）
+// ---------------------------------------------------------------------------
+
+/** 浏览器存储的最小接口（结构化类型，避免跨模块 import 值）。 */
+export interface CorpusStorage {
+  getItem(key: string): string | null;
+}
+
+/** 单角色会话键（C-02 / R9：群聊记录在 `tavern.groupSessions`，本模块不碰）。 */
+export const SESSIONS_KEY = 'tavern.sessions';
+
+/**
+ * 读单角色语料。
+ *
+ * 读取失败**抛出**（由调用方转成 `failed` 态）——不得静默成「零建议」（R-11）。
+ * 解析失败单独标注「解析失败」（与「存储不可用」区分开：前者是数据坏了，
+ * 后者是环境问题），并说明**未改动任何数据**。
+ */
+export function readLocalSessions(storage: CorpusStorage | null): ChatSession[] {
+  if (!storage) throw new Error('本机存储不可用，读不到会话语料');
+  const raw = storage.getItem(SESSIONS_KEY);
+  if (!raw) return [];
+  try {
+    return normalizeSessions(JSON.parse(raw));
+  } catch (e) {
+    throw new Error(`会话语料解析失败（数据未被改动）：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+export interface CharacterScope {
+  sessions: ChatSession[];
+  /** 生效的角色名（null = 未限定，用了全部会话） */
+  character: string | null;
+  /** 给用户看的一句话（R-11：限定与退回都要**显性**） */
+  note: string;
+}
+
+/**
+ * 按角色限定语料（**跨角色污染的结构性封堵**）。
+ *
+ * 为什么必须有：`tavern.sessions` 是**一个**键里的**全部**角色的会话，
+ * 直接送进管线会让角色 A 学到的簇里混进角色 B 的专名与口头禅。
+ * 归属键是 `characterName`（与 `listFor()` 同口径，见 `chat-sessions.ts` 文件头）。
+ *
+ * `fallback` 决定「拿不到角色名」时的行为 —— 两条路径的要求**不同**：
+ * · `'all'`（默认，**手动**点「开始学习」）：学本机全部单角色会话，但**必须显性告知**；
+ *   这是用户自己的显式动作，跨角色是知情选择。
+ * · `'none'`（**静默**学习路径必须用这个）：宁可不学，也不把其它角色的语料混进来
+ *   （A-6 缺陷的封堵点；静默路径没有用户在场，不能"知情"）。
+ */
+export function scopeToCharacter(
+  sessions: ChatSession[],
+  characterName: string | null,
+  fallback: 'all' | 'none' = 'all',
+): CharacterScope {
+  const name = typeof characterName === 'string' ? characterName.trim() : '';
+  if (!name) {
+    if (fallback === 'none') {
+      return {
+        sessions: [],
+        character: null,
+        note: '这次会话没有归属角色，静默学习已跳过（避免把其它角色的语料混进来）',
+      };
+    }
+    return {
+      sessions,
+      character: null,
+      note: `没有正在进行的会话，本次学习的是本机全部 ${sessions.length} 个单角色会话`,
+    };
+  }
+  const scoped = sessions.filter((s) => s.characterName === name);
+  const others = sessions.length - scoped.length;
+  return {
+    sessions: scoped,
+    character: name,
+    note:
+      `本次只学《${name}》的 ${scoped.length} 个会话` +
+      (others > 0 ? `（本机另有 ${others} 个会话属于其它角色，不参与）` : ''),
+  };
+}
