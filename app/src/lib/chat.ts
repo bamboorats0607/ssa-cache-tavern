@@ -46,6 +46,10 @@ export interface GenerateOptions {
   frequencyPenalty: number;
   presencePenalty: number;
   topP: number;
+  /** top_k；0 = 不限制。默认 0 → 不下发（与后端语义等价，取证见 buildBody） */
+  topK?: number;
+  /** 随机种子；-1 = 每次随机。默认 -1 → 不下发 */
+  seed?: number;
   maxTokens: number;
   stream: boolean;
   /**
@@ -67,6 +71,21 @@ export interface GenerateOptions {
   apiKey?: string;
   userName?: string;
   charName?: string;
+  /**
+   * 需要**强制下发**的采样参数（`min_p` / `repetition_penalty`）。
+   *
+   * 为什么不能像 top_k 那样直接加字段：后端最终请求体（chat-completions.js:3470）
+   * 只为 custom 源转发 temperature / top_p / top_k / penalties / seed，
+   * `min_p` 与 `repetition_penalty` 只出现在 NANOGPT 等分支的 bodyParams 里，
+   * 直接下发会被**静默丢弃**（UI 有控件、模型收不到）。
+   *
+   * 唯一通路是 `custom_include_body`：chat-completions.js:3235 在 custom 分支
+   * 调用 `mergeObjectWithYaml(bodyParams, …)`（util.js:868），而它按 **YAML 字符串**
+   * 解析 —— 传对象会 parse 失败被 try/catch 吞掉，表现仍是「发了没生效」。
+   *
+   * 故此处为显式逃生口：不传 → 请求体与接入前逐字节相同。
+   */
+  forcedSamplers?: Record<string, number>;
   signal?: AbortSignal;
 }
 
@@ -139,7 +158,14 @@ export async function getCsrfToken(force = false): Promise<string | null> {
 // 生成
 // ---------------------------------------------------------------------------
 
-/** 组装请求体（字段名严格对齐 openai.js:5241-5268）。 */
+/**
+ * 组装请求体（字段名严格对齐 openai.js:5241-5268）。
+ *
+ * 可选采样参数一律**只在偏离默认值时下发**：后端对 top_k 的判据本身就是
+ * `> 0 ? 值 : undefined`、对 seed 是无门控原样转发（chat-completions.js:3470），
+ * 所以「没动过设置」的请求体保持逐字节不变 —— 既不打乱供应商侧的参数缓存，
+ * 也让任何回归对比都能成立。
+ */
 function buildBody(o: GenerateOptions): Record<string, unknown> {
   const source = o.source ?? 'custom';
   const body: Record<string, unknown> = {
@@ -168,7 +194,36 @@ function buildBody(o: GenerateOptions): Record<string, unknown> {
   if (o.apiKey) {
     body.api_key = o.apiKey;
   }
+  // top_k：后端最终请求体是 `top_k > 0 ? top_k : undefined`（chat-completions.js:3470），
+  // 即 0 与不下发等价 —— 只在 >0 时带上，保证默认参数下请求体与接入前一致。
+  if (typeof o.topK === 'number' && o.topK > 0) {
+    body.top_k = o.topK;
+  }
+  // seed：后端无门控、原样转发；-1 是「每次随机」语义，不下发即等于默认行为
+  if (typeof o.seed === 'number' && o.seed !== -1) {
+    body.seed = o.seed;
+  }
+  if (source === 'custom' && o.forcedSamplers) {
+    const yaml = toYamlMapping(o.forcedSamplers);
+    if (yaml) body.custom_include_body = yaml;
+  }
   return body;
+}
+
+/**
+ * 把数值映射写成最小 YAML 字符串。
+ *
+ * `custom_include_body` 只接受字符串（后端 yaml.parse），传对象会被静默吞掉。
+ * 这里用**键名白名单**（字母/数字/下划线）+ **只接受有限数值**两道约束，
+ * 拼接结果不可能越出 `key: number` 这一种形态。
+ */
+function toYamlMapping(o: Record<string, number>): string | undefined {
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(o)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k) || !Number.isFinite(v)) continue;
+    lines.push(`${k}: ${v}`);
+  }
+  return lines.length > 0 ? lines.join('\n') : undefined;
 }
 
 /**

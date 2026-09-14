@@ -9,13 +9,15 @@
   import MessageBubble from '../lib/MessageBubble.svelte';
   import Avatar from '../lib/Avatar.svelte';
   import { probeBackend, characterAvatarUrl, type ServiceState } from '../lib/backend';
-  import { generateReply, type TokenUsage } from '../lib/chat';
+  import { generateReply, type GenerateOptions, type TokenUsage } from '../lib/chat';
   import { buildContext, mergeUsage } from '../lib/chat-context';
   import type { FactSlotState } from '../lib/context/assembler';
   import type { TurnStats } from '../lib/chat-stats';
   import { characters } from '../stores/characters.svelte';
   import { modelConfig } from '../stores/model.svelte';
   import { ctxConfig } from '../stores/context.svelte';
+  import { writingStyle } from '../stores/writing-style.svelte';
+  import { splitBurst } from '../lib/style/burst';
   import { worldbook } from '../stores/worldbook.svelte';
   import { sessions } from '../stores/sessions.svelte';
   // 静默学习（M2）：只在事件点通知学习闸；学习闸自己判定是否真的跑
@@ -416,6 +418,8 @@
         maxContext: modelConfig.maxContext,
       },
       factState: factState ?? undefined,
+      // 风格块进冻结前缀区，必须是会话内字节恒定的同一字符串（store 已按状态缓存）
+      styleGuide: writingStyle.guide || undefined,
     });
     // 事实槽 append-only 推进，需跨轮保持
     if (out.factState) factState = out.factState;
@@ -499,6 +503,7 @@
       charName: speakerNameOf(speakerKey),
       cfg: { ...ctxConfig.toSsaConfig(), maxContext: modelConfig.maxContext },
       factState: groupFactState ?? undefined,
+      styleGuide: writingStyle.guide || undefined,
       group: {
         memberNames: g.memberKeys.map(speakerNameOf),
         speakerName: speakerNameOf(speakerKey),
@@ -517,20 +522,8 @@
       const result = await generateReply(
         {
           messages: turns,
-          model: modelConfig.model,
-          temperature: modelConfig.temp,
-          frequencyPenalty: modelConfig.freqPen,
-          presencePenalty: modelConfig.presPen,
-          topP: modelConfig.topP,
-          maxTokens: modelConfig.maxTokens,
-          stream: modelConfig.stream,
-          thinking: modelConfig.thinking,
-          source: 'custom',
-          customUrl: modelConfig.apiUrl || undefined,
-          apiKey: modelConfig.apiKey || undefined,
-          userName: modelConfig.userName,
+          ...requestOptions(abortCtl.signal),
           charName: speakerNameOf(speakerKey),
-          signal: abortCtl.signal,
         },
         (full) => {
           if (pendingGroup) pendingGroup = { ...pendingGroup, text: full };
@@ -638,20 +631,8 @@
       const result = await generateReply(
         {
           messages: turns,
-          model: modelConfig.model,
-          temperature: modelConfig.temp,
-          frequencyPenalty: modelConfig.freqPen,
-          presencePenalty: modelConfig.presPen,
-          topP: modelConfig.topP,
-          maxTokens: modelConfig.maxTokens,
-          stream: modelConfig.stream,
-          thinking: modelConfig.thinking,
-          source: 'custom',
-          customUrl: modelConfig.apiUrl || undefined,
-          apiKey: modelConfig.apiKey || undefined,
-          userName: modelConfig.userName,
+          ...requestOptions(abortCtl.signal),
           charName,
-          signal: abortCtl.signal,
         },
         (full) => {
           // 流式：只更新临时层，库不动
@@ -831,6 +812,40 @@
   });
 
   /**
+   * 采样与连接参数（群聊/单聊两处生成共用一份，避免两边字段漂移）。
+   *
+   * 顺带把两个「UI 有控件、后端收不到」的参数接上：`min_p` 与
+   * `repetition_penalty` 不在 custom 源的转发清单里（chat-completions.js:3470），
+   * 只能经 `custom_include_body` 强制下发。因此只在用户开了 `forceSamplers`
+   * **且值偏离默认**时才带 —— 默认参数下请求体与接入前逐字节一致。
+   */
+  function requestOptions(signal: AbortSignal) {
+    const forced: Record<string, number> = {};
+    if (modelConfig.forceSamplers) {
+      if (modelConfig.minP > 0) forced.min_p = modelConfig.minP;
+      if (modelConfig.repPen !== 1) forced.repetition_penalty = modelConfig.repPen;
+    }
+    return {
+      model: modelConfig.model,
+      temperature: modelConfig.temp,
+      frequencyPenalty: modelConfig.freqPen,
+      presencePenalty: modelConfig.presPen,
+      topP: modelConfig.topP,
+      topK: modelConfig.topK,
+      seed: modelConfig.seed,
+      maxTokens: modelConfig.maxTokens,
+      stream: modelConfig.stream,
+      thinking: modelConfig.thinking,
+      source: 'custom',
+      customUrl: modelConfig.apiUrl || undefined,
+      apiKey: modelConfig.apiKey || undefined,
+      userName: modelConfig.userName,
+      forcedSamplers: forced,
+      signal,
+    } satisfies Omit<GenerateOptions, 'messages' | 'charName'>;
+  }
+
+  /**
    * 返回键处理（优先级 100，最高）：对话列表抽屉展开时先收起抽屉，
    * 否则放行给下一级（设置子页 → App 末级 → 原生）。
    */
@@ -992,30 +1007,40 @@
         {/if}
       </div>
     {:else}
+      {#snippet bubble(m: Msg, text: string, tail: boolean)}
+        <!-- tail：仅最后一条气泡承载用量统计与撤销/改写/重生成
+             （一条回复切多条时，操作只能有一个落点） -->
+        <MessageBubble
+          role={m.role}
+          text={text}
+          stats={tail ? m.stats : undefined}
+          images={tail ? m.images : undefined}
+          avatarUrl={m.speaker ? characterAvatarUrl(m.speaker) : activeAvatarUrl}
+          avatarName={m.speaker ? speakerNameOf(m.speaker) : activeChar?.name}
+          canEditUser={!groupMode && m.role === 'user'}
+          canRegenerate={!groupMode && m.role === 'assistant'}
+          onUndo={tail && !groupMode && !generating && m.turnId
+            ? () => (m.role === 'user' ? undoFromUser(m.turnId!) : undoAssistant(m.turnId!))
+            : undefined}
+          onRewrite={tail && !groupMode && !generating && m.turnId ? () => rewriteUser(m.turnId!) : undefined}
+          onRegenerate={tail && !groupMode && !generating && m.turnId ? () => regenerateAssistant(m.turnId!) : undefined}
+        />
+      {/snippet}
       {#each messages as m (m.id)}
         {#if m.role === 'assistant' && !m.text && generating}
           <div class="thinking" aria-label="模型正在思考">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
             <span class="thinking-text">正在思考…</span>
           </div>
+        {:else if m.role === 'assistant' && writingStyle.state.burst && splitBurst(m.text).length > 1}
+          <!-- 分条：把一条回复按短消息切成多个气泡（纯展示，落盘仍是完整一段）。
+               长度闸门在 lib/style/burst.ts —— 长段描写不会被切碎。 -->
+          {@const segs = splitBurst(m.text)}
+          {#each segs as seg, i (i)}
+            {@render bubble(m, seg, i === segs.length - 1)}
+          {/each}
         {:else}
-          <!-- 仅对已落盘轮次（有 turnId）且非生成中注入操作回调；
-               进行中的临时一轮（pending）不提供撤销/重生成，避免与流冲突 -->
-          <MessageBubble
-            role={m.role}
-            text={m.text}
-            stats={m.stats}
-            images={m.images}
-            avatarUrl={m.speaker ? characterAvatarUrl(m.speaker) : activeAvatarUrl}
-            avatarName={m.speaker ? speakerNameOf(m.speaker) : activeChar?.name}
-            canEditUser={!groupMode && m.role === 'user'}
-            canRegenerate={!groupMode && m.role === 'assistant'}
-            onUndo={!groupMode && !generating && m.turnId
-              ? () => (m.role === 'user' ? undoFromUser(m.turnId!) : undoAssistant(m.turnId!))
-              : undefined}
-            onRewrite={!groupMode && !generating && m.turnId ? () => rewriteUser(m.turnId!) : undefined}
-            onRegenerate={!groupMode && !generating && m.turnId ? () => regenerateAssistant(m.turnId!) : undefined}
-          />
+          {@render bubble(m, m.text, true)}
         {/if}
       {/each}
     {/if}

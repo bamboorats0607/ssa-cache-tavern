@@ -15,7 +15,8 @@
     "hash:dist": "node scripts/hash-dist.mjs dist",
     "verify:determinism": "npm run build && npm run hash:dist",
     "verify:build-determinism": "node scripts/verify-determinism.mjs",
-    "verify:cap-sync": "node scripts/check-cap-sync.mjs dist"
+    "verify:cap-sync": "node scripts/check-cap-sync.mjs dist",
+    "verify:style": "node scripts/check-style-guide.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

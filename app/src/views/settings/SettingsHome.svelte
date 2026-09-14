@@ -11,6 +11,9 @@
   import { ctxConfig, memoryConfig } from '../../stores/context.svelte';
   import { modelConfig } from '../../stores/model.svelte';
   import { advanced } from '../../stores/advanced.svelte';
+  import { writingStyle } from '../../stores/writing-style.svelte';
+  import { describeStyle } from '../../lib/style/guide';
+  import { DEPTHS, LENSES } from '../../lib/style/types';
   import { sessions } from '../../stores/sessions.svelte';
   import { groups } from '../../stores/groups.svelte'; // [SSA-GROUP]
   import { learningGate } from '../../lib/learning/suggest-gate.svelte'; // [SSA-LEARN]
@@ -55,6 +58,14 @@
   const memoryState = $derived(
     memoryConfig.graphEnabled ? '摘要 + 关系' : '仅摘要',
   );
+
+  /** 写作风格当前值：让用户不进页面就知道现在注入的是什么。 */
+  const styleSummary = $derived(
+    describeStyle(writingStyle.state, {
+      depth: (k) => DEPTHS.find((d) => d.key === k)?.label ?? k,
+      lens: (k) => LENSES.find((l) => l.key === k)?.label ?? k,
+    }),
+  );
 </script>
 
 <div class="settings-page">
@@ -86,6 +97,12 @@
       label="指令模式"
       value={advanced.get('instructEnabled') ? '已启用' : '未启用'}
       onclick={() => onNavigate('instruct')}
+    />
+    <SettingRow
+      label="写作风格"
+      desc="聊天体 / 尺度 / 视角 / 风格样本"
+      value={styleSummary}
+      onclick={() => onNavigate('writing')}
     />
   </SettingGroup>
 

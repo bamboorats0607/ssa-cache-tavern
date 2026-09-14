@@ -19,10 +19,10 @@
     { k: 'temp' as const, label: '温度', desc: '越高越随机', min: 0, max: 2, step: 0.01 },
     { k: 'topP' as const, label: 'Top P', desc: '核采样阈值', min: 0, max: 1, step: 0.01 },
     { k: 'topK' as const, label: 'Top K', desc: '0 = 不限制', min: 0, max: 500, step: 1 },
-    { k: 'minP' as const, label: 'Min P', desc: '低于阈值概率的候选剔除', min: 0, max: 1, step: 0.001 },
+    { k: 'minP' as const, label: 'Min P', desc: '剔除低概率候选（需开下方「强制下发」）', min: 0, max: 1, step: 0.001 },
     { k: 'freqPen' as const, label: '频率惩罚', desc: '抑制重复用词', min: -2, max: 2, step: 0.01 },
     { k: 'presPen' as const, label: '存在惩罚', desc: '鼓励新话题', min: -2, max: 2, step: 0.01 },
-    { k: 'repPen' as const, label: '重复惩罚', desc: '1.0 = 关闭', min: 1, max: 2, step: 0.01 },
+    { k: 'repPen' as const, label: '重复惩罚', desc: '1.0 = 关闭（需开下方「强制下发」）', min: 1, max: 2, step: 0.01 },
   ];
 
   const modelName = $derived(modelConfig.model || '后端默认');
@@ -73,6 +73,13 @@
         {/snippet}
       </SettingRow>
     {/each}
+    <SettingRow
+      label="强制下发扩展采样"
+      desc="Min P / 重复惩罚默认不会被后端转发；开启后经扩展字段强送，端点不认识会直接报错"
+      kind="toggle"
+      checked={modelConfig.forceSamplers}
+      onchange={(v) => modelConfig.set('forceSamplers', v)}
+    />
   </SettingGroup>
 
   <SettingGroup title="长度">

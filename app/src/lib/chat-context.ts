@@ -9,7 +9,7 @@
  * 抽成**纯函数**后：不依赖任何 store / DOM，可直接在 Node 里跑断言。
  *
  * ── 缓存友好序（本函数的核心不变量）──────────────────────────────────────
- * 输出顺序固定为 `system(角色) → system(世界书前缀) → history → system(尾缀)`：
+ * 输出顺序固定为 `system(角色/群常量头) → system(风格) → system(世界书前缀) → [群发言人卡] → history → system(尾缀)`：
  *   · 前缀区字节冻结 → 吃上游前缀缓存（命中价约为输入价 1/10）
  *   · 尾缀区每轮变化 → 必然 miss，故置于**最末**，不影响前面的稳定性
  * 这个顺序不可随意调整，否则缓存命中会崩。
@@ -71,6 +71,14 @@ export interface BuildContextInput {
    *  · 关系矩阵 / 优先级 / 触发位**一律不得进入本结构**（spec R14）——它们只影响「谁说话」
    */
   group?: GroupContext;
+  /**
+   * 风格块（聊天体 / 尺度 / 视角 / 语感参照）。空或不传 = 不注入，输出与接入前逐字节相同。
+   *
+   * **必须是会话内字节恒定的字符串**：它落在角色块之后的冻结前缀区，任何一个字节
+   * 变化都会击穿整段前缀缓存（R1）。生成与冻结由 `lib/style/guide.ts` 与
+   * `stores/writing-style.svelte.ts` 保证；调用方**不要在每轮里重新拼这段文本**。
+   */
+  styleGuide?: string;
 }
 
 /** 群聊组装所需的最小上下文（不含任何规则数据）。 */
@@ -137,6 +145,15 @@ export function buildContext(input: BuildContextInput): BuildContextOutput {
       role: 'system',
       content: `你正在扮演「${charName}」。角色设定：${desc}\n请始终保持这个角色的语气与性格进行对话。`,
     });
+  }
+
+  // 1.5) 风格块（可选）：角色块之后、世界书前缀之前。
+  //      位置理由：① 角色身份优先于文风（风格块只约束「怎么说」，不覆盖「谁在说」）；
+  //      ② 此处属冻结前缀区（R1），且不改变既有块的相对顺序。
+  //      约束：调用方必须传**同一个字符串实例**（store 已做缓存），不要每轮重拼。
+  const style = input.styleGuide?.trim();
+  if (style) {
+    turns.push({ role: 'system', content: style });
   }
 
   // 2) 世界书前缀区（骨架，字节冻结 —— 缓存命中的主要来源）

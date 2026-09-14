@@ -49,6 +49,16 @@ export interface ModelConfig {
    * 烧掉 726 个推理 token。角色扮演不需要思考，且首字延迟明显更长。
    */
   thinking: boolean;
+
+  /**
+   * 是否把 `min_p` / `repetition_penalty` 经 `custom_include_body` **强制**下发。
+   *
+   * 为什么需要这个开关：本机后端的最终请求体只为 custom 源转发
+   * temperature / top_p / top_k / penalties / seed，这两个参数默认**收不到**。
+   * 强制下发要求端点自身认识它们（否则可能直接 400），所以默认**关**，
+   * 由用户按端点能力自行开启。见 `lib/chat.ts` 的 `forcedSamplers`。
+   */
+  forceSamplers: boolean;
 }
 
 export const DEFAULT_MODEL: ModelConfig = {
@@ -77,6 +87,7 @@ export const DEFAULT_MODEL: ModelConfig = {
   maxTokens: 300,
   stream: true,
   thinking: false,
+  forceSamplers: false,
 };
 
 function load(): ModelConfig {
@@ -110,6 +121,7 @@ class ModelStore {
   maxTokens = $state(DEFAULT_MODEL.maxTokens);
   stream = $state(DEFAULT_MODEL.stream);
   thinking = $state(DEFAULT_MODEL.thinking);
+  forceSamplers = $state(DEFAULT_MODEL.forceSamplers);
 
   constructor() {
     Object.assign(this, load());
@@ -135,6 +147,7 @@ class ModelStore {
       maxTokens: this.maxTokens,
       stream: this.stream,
       thinking: this.thinking,
+      forceSamplers: this.forceSamplers,
     };
   }
 

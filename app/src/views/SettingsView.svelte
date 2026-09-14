@@ -18,6 +18,7 @@
   import AppearancePage from './settings/AppearancePage.svelte';
   import PersonaPage from './settings/PersonaPage.svelte';
   import ChatSettingsPage from './settings/ChatSettingsPage.svelte';
+  import WritingStylePage from './settings/WritingStylePage.svelte';
   import UsagePage from './settings/UsagePage.svelte';
   import LearningPage from './settings/LearningPage.svelte'; // [SSA-LEARN]
   import PlaceholderPage from '../lib/settings/PlaceholderPage.svelte';
@@ -36,6 +37,7 @@
     | 'appearance'
     | 'persona'
     | 'chat'
+    | 'writing'
     | 'usage'
     | 'learning'
     | 'preset'
@@ -90,6 +92,8 @@
   <PersonaPage onBack={back} />
 {:else if page === 'chat'}
   <ChatSettingsPage onBack={back} />
+{:else if page === 'writing'}
+  <WritingStylePage onBack={back} />
 {:else if page === 'usage'}
   <UsagePage onBack={back} />
 {:else if page === 'learning'}
