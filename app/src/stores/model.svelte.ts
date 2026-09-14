@@ -8,6 +8,7 @@
  */
 
 import { logger } from '../lib/logger';
+import { syncApiKey } from '../lib/secrets';
 
 const KEY = 'tavern.model';
 
@@ -125,6 +126,8 @@ class ModelStore {
 
   constructor() {
     Object.assign(this, load());
+    // 已存的 key 也要补写一次：老版本只把它放进了请求体，后端密钥库里是空的。
+    if (this.apiKey) void syncApiKey(this.apiKey);
   }
 
   snapshot(): ModelConfig {
@@ -165,12 +168,15 @@ class ModelStore {
     this[key] = value;
     this.persist();
     logger.debug('model', `${String(key)} = ${String(value)}`);
+    // 后端密钥库与 localStorage 是两份存储，改 key 时必须同步，否则请求带着空 Authorization 出门
+    if (key === 'apiKey') void syncApiKey(this.apiKey);
   }
 
   reset() {
     Object.assign(this, DEFAULT_MODEL);
     this.persist();
     logger.info('model', '已恢复默认参数');
+    void syncApiKey(this.apiKey);
   }
 }
 

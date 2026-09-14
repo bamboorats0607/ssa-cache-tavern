@@ -9,6 +9,7 @@
 
 import { modelConfig } from './model.svelte';
 import { normalizeApiUrl } from '../lib/api-url';
+import { syncApiKey } from '../lib/secrets';
 import { logger } from '../lib/logger';
 
 const KEY = 'tavern.api.profiles';
@@ -79,13 +80,19 @@ class ApiProfilesStore {
     return this.list.find((p) => p.id === this.activeId) ?? null;
   }
 
-  /** 把 active 的端点/密钥/模型写到 model store（不落盘，由调用方决定是否 persist）。 */
+  /**
+   * 把 active 的端点/密钥/模型写到 model store（不落盘，由调用方决定是否 persist）。
+   *
+   * 这里是所有「当前配置变更」的唯一漏斗：编辑、切换、删除都会经过。
+   * 密钥必须同时写进后端密钥库——上游 custom 分支只从那里读（见 lib/secrets.ts）。
+   */
   private applyActive() {
     const p = this.active;
     if (!p) return;
     modelConfig.apiUrl = p.apiUrl;
     modelConfig.apiKey = p.apiKey;
     modelConfig.model = p.model;
+    void syncApiKey(p.apiKey);
   }
 
   /**

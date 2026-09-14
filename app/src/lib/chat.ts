@@ -18,6 +18,7 @@
 
 import { getBaseUrl } from './backend';
 import { logger } from './logger';
+import { syncApiKey } from './secrets';
 
 /**
  * 消息内容部件。
@@ -235,6 +236,10 @@ export async function generateReply(
   o: GenerateOptions,
   onDelta?: (fullText: string) => void,
 ): Promise<GenerateResult> {
+  // 密钥必须先在后端密钥库就位：custom 源只从那里读，body.api_key 是被忽略的。
+  // 放在发请求这个唯一咽喉上，任何往 store 里塞 key 的路径都不会漏。
+  await syncApiKey(o.apiKey ?? '');
+
   const token = await getCsrfToken();
   const url = `${getBaseUrl()}/api/backends/chat-completions/generate`;
 
@@ -245,15 +250,31 @@ export async function generateReply(
     source: o.source ?? 'custom',
   });
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { 'X-CSRF-Token': token } : {}),
-    },
-    body: JSON.stringify(buildBody(o)),
-    signal: o.signal,
-  });
+  const send = () =>
+    fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'X-CSRF-Token': token } : {}),
+      },
+      body: JSON.stringify(buildBody(o)),
+      signal: o.signal,
+    });
+
+  let res = await send();
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => '');
+
+    // 密钥库可能被外部清掉（清数据、恢复备份）而本地还留着 key：此时后端
+    // 收到的是空 Authorization。带 key 却被判未认证 → 强制回读重推一次再试。
+    const unauth = res.status === 401 || res.status === 403 || /unauth/i.test(detail);
+    if (unauth && o.apiKey) {
+      logger.warn('chat', '未认证，重推密钥后重试一次', { status: res.status });
+      await syncApiKey(o.apiKey, { force: true });
+      res = await send();
+    }
+  }
 
   if (!res.ok) {
     // 401/403 多半是 CSRF 轮换（后端重启），强制刷新后由调用方重试
@@ -262,49 +283,74 @@ export async function generateReply(
     throw new Error(`生成请求失败（${res.status}）。${detail.slice(0, 200)}`);
   }
 
-  const isStream =
-    o.stream && (res.headers.get('Content-Type') ?? '').includes('text/event-stream');
-
-  if (!isStream) {
-    const data = (await res.json()) as {
-      choices?: { message?: { content?: string; reasoning_content?: string } }[];
-      error?: { message?: string };
-      usage?: Record<string, unknown>;
-    };
-    if (data.error) throw new Error(data.error.message ?? '模型返回错误');
-    const text = data.choices?.[0]?.message?.content ?? '';
-    onDelta?.(text);
-    return {
-      text,
-      reasoning: data.choices?.[0]?.message?.reasoning_content,
-      usage: normalizeUsage(data.usage),
-    };
-  }
-
-  return streamReply(res, onDelta);
-}
-
-/** 解析 SSE 流（标准 `data: <json>` + `data: [DONE]`）。 */
-async function streamReply(
-  res: Response,
-  onDelta?: (full: string) => void,
-): Promise<GenerateResult> {
-  if (!res.body) throw new Error('响应无 body，无法流式读取');
-
+  // ── 流式判定：不能只看响应头（实测踩过）────────────────────────────────
+  // 上游在流式成功路径上**不写 Content-Type**：forwardFetchResponse 只做
+  // `from.body.pipe(to)`（server-ref/src/util.js:753-828），实测响应里确实
+  // 没有该头。于是 `Content-Type` 判据恒为假 → 整段 `data: {...}` 被丢进
+  // JSON.parse → 报 `Unexpected token 'd'`，界面永远出不来回复。
+  // 改为读**首个分片**判断：SSE 帧必然以 `data:` 开头；响应头只作辅助判据。
+  if (!res.body) throw new Error('响应无 body，无法读取');
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
+  const first = await reader.read();
+  const head = first.done ? '' : decoder.decode(first.value, { stream: true });
+  const headerSaysStream = (res.headers.get('Content-Type') ?? '').includes('text/event-stream');
+
+  if (/^\s*data:/.test(head) || headerSaysStream) {
+    return streamReply(reader, decoder, head, onDelta);
+  }
+
+  // 非流式：把已读的首个分片与剩余 body 拼回完整 JSON 再解析
+  //（端点忽略 stream 参数、直接回整包 JSON 时走这里）
+  let raw = head;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    raw += decoder.decode(value, { stream: true });
+  }
+  raw += decoder.decode();
+
+  let data: {
+    choices?: { message?: { content?: string; reasoning_content?: string } }[];
+    error?: { message?: string };
+    usage?: Record<string, unknown>;
+  };
+  try {
+    data = JSON.parse(raw);
+  } catch {
+    logger.error('chat', '响应既不是 SSE 也不是可解析的 JSON', { head: raw.slice(0, 200) });
+    throw new Error(`无法解析模型响应（前 200 字）：${raw.slice(0, 200)}`);
+  }
+  if (data.error) throw new Error(data.error.message ?? '模型返回错误');
+  const text = data.choices?.[0]?.message?.content ?? '';
+  onDelta?.(text);
+  return {
+    text,
+    reasoning: data.choices?.[0]?.message?.reasoning_content,
+    usage: normalizeUsage(data.usage),
+  };
+}
+
+/** 解析 SSE 流（标准 `data: <json>` + `data: [DONE]`）。
+ *
+ * `initial` 是调用方为了判定「是不是 SSE」已经读掉的**首个分片**：不能丢，
+ * 否则首帧（可能含正文开头甚至整条回复）会凭空少一截。
+ */
+async function streamReply(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  decoder: TextDecoder,
+  initial: string,
+  onDelta?: (full: string) => void,
+): Promise<GenerateResult> {
   let buffer = '';
   let full = '';
   let reasoning = '';
   let usage: GenerateResult['usage'];
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
+  /** 按行切分并消费完整的 SSE 帧；残行留在 buffer 里等下一片。 */
+  const consume = (chunk: string) => {
     // 上游可能用 \r\n 分隔，统一归一后再按行切
-    buffer = buffer.replace(/\r\n/g, '\n');
+    buffer = (buffer + chunk).replace(/\r\n/g, '\n');
     const lines = buffer.split('\n');
     buffer = lines.pop() ?? '';
 
@@ -338,7 +384,15 @@ async function streamReply(
         onDelta?.(full);
       }
     }
+  };
+
+  consume(initial);
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    consume(decoder.decode(value, { stream: true }));
   }
+  consume(decoder.decode());
 
   logger.info('chat', '生成完成', {
     chars: full.length,
