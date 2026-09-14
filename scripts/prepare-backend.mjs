@@ -60,7 +60,7 @@ const EXCLUDED_DIRS = [
 ];
 
 // 资产目录里由人手写、必须原地保留的文件（脚本绝不覆盖/删除）。
-const PRESERVE = ['main.js', 'config.yaml'];
+const PRESERVE = ['main.js', 'config.yaml', 'net-guard.js'];
 
 // ---------------------------------------------------------------------------
 

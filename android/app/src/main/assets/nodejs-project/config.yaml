@@ -38,16 +38,23 @@ browserLaunch:
 ssl:
   enabled: false
 
-# -- CORS（阻断级修复）--
+# -- CORS（阻断级修复 × 安全收窄）--
 # 页面 origin = https://localhost（Capacitor androidScheme:'https'），
 # 后端 origin = http://127.0.0.1:4444 → 跨 origin。
 # 上游默认 origin 仅 ["null"]、methods 仅 ["OPTIONS"]，
 # 会导致响应不带任何 Access-Control-Allow-* 头 → 前端 fetch 被 WebView 判为
 # 跨域不可读 → probeBackend() / fetchCharacters() 全部失败。
+#
+# 安全收窄（2026-09-14）：**删掉 "null"**。`Origin: null` 是沙箱 iframe /
+# file:// / data: 页面发出的起源 —— 放行它等于允许任意恶意网页**读走**本机后端
+# 的响应（无鉴权 loopback SSRF 的读取侧）。本 App 自己的页面只可能是
+# https://localhost，不需要 "null"。
+# 注意：本文件只在首启播种一次，已安装设备不会被覆盖 —— 真正的强制点在
+# main.js + net-guard.js（每次启动按当前 APK 重装），此处只是让新装设备
+# 在配置层就一致。
 cors:
   enabled: true
   origin:
-    - "null"
     - "https://localhost"
   methods:
     - "OPTIONS"

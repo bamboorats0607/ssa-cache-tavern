@@ -14,9 +14,14 @@
 
 import http from 'node:http';
 import https from 'node:https';
-import { URL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
+import {
+    assertPublicTarget,
+    corsAllowValue,
+    installGuardedGlobalAgents,
+    isAllowedOrigin,
+} from './net-guard.js';
 
 const PORT = 4444;
 const HOST = '127.0.0.1';
@@ -40,6 +45,13 @@ const baseDir =
 
 console.log('[tavern] baseDir =', baseDir);
 console.log('[tavern] node =', process.version, 'mobile =', process.versions.mobile ?? 'n/a');
+
+// 网络策略在**上游加载之前**装好（顺序有语义）：
+//   · 出站 agent 必须在任何出站请求发生前替换 globalAgent（上游的模型代理走
+//     node-fetch，未显式传 agent 时用的就是它）；
+//   · 入站响应策略必须在第一个请求被处理前 patch 好 ServerResponse。
+// 详见 installNetworkPolicy() / net-guard.js 顶部说明。
+installNetworkPolicy();
 
 // ---------------------------------------------------------------------------
 // 拦截 process.exit：nodejs-mobile 下会终止整个 App 进程（实测）。
@@ -102,7 +114,7 @@ function readJsonBody(req) {
  */
 function proxyGenerate(req, res) {
     readJsonBody(req)
-        .then((body) => {
+        .then(async (body) => {
             const target = body.custom_url || process.env.TAVERN_API_URL;
             if (!target) {
                 res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -114,14 +126,20 @@ function proxyGenerate(req, res) {
                 return;
             }
 
-            let targetUrl;
-            try {
-                targetUrl = new URL(target);
-            } catch {
+            // 出站白名单：仅 http/https，且目标必须解析到**公网单播**地址。
+            // 不合法时在发请求之前就拒绝，文案要能指导用户改配置（而不是静默失败）。
+            // 注意这里只是「早退一份友好错误」；真正的强制点在 GuardedAgent
+            //（连接前校验并把连接钉在已校验 IP 上），二者对同一策略求值。
+            const verdict = await assertPublicTarget(target);
+            if (!verdict.ok) {
+                console.warn(`[tavern] 已拦截代理目标 ${target} —— ${verdict.reason}`);
                 res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' });
-                res.end(JSON.stringify({ error: { message: `模型地址无效：${target}` } }));
+                res.end(JSON.stringify({
+                    error: { message: `模型地址不被允许：${verdict.reason}` },
+                }));
                 return;
             }
+            const targetUrl = verdict.url;
 
             // 组装发给模型端点的体：只保留标准 OpenAI 字段，剔除内部字段
             const {
@@ -195,7 +213,13 @@ function startFallbackApi() {
 
     fallbackServer = http.createServer((req, res) => {
         const url = req.url ?? '/';
-        res.setHeader('Access-Control-Allow-Origin', '*');
+        // CORS 头：**绝不发 `*`** —— 回显已放行的来源；未放行则一个 CORS 头都不发
+        //（installNetworkPolicy 的 setHeader 钩子还会再兜一层，这里保持一致以免误读）
+        const allowOrigin = corsAllowValue(req.headers.origin);
+        if (allowOrigin !== null) {
+            res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+            res.setHeader('Vary', 'Origin');
+        }
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token');
         res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
         if (req.method === 'OPTIONS') {
@@ -251,8 +275,12 @@ function startFallbackApi() {
 }
 
 // ---------------------------------------------------------------------------
-// 放开 CORP（Cross-Origin-Resource-Policy）—— 图片链路的必要前提
+// 入站响应策略：放开 CORP + CORS 收敛 + 来源（Origin）白名单
 //
+// 只 patch `http.ServerResponse.prototype` 的四个方法（setHeader / writeHead /
+// write / end），上游源码零改动。策略本体在 net-guard.js（可单测）。
+//
+// ── (一) 放开 CORP（Cross-Origin-Resource-Policy）：图片链路的必要前提 ──
 // 现象（真机实测）：`fetch('/api/characters/all')` 成功（角色名显示正常），
 // 但头像 `<img>` 与背景 `--bg-art` 全部加载失败 → 界面只剩首字母兜底。
 //
@@ -263,19 +291,162 @@ function startFallbackApi() {
 // `<img>` / CSS `background-image` 属 no-cors 请求，不受 CORS 头影响，
 // 但**受 CORP 约束**：响应声明 same-origin 时浏览器直接拒收（fetch 那侧因
 // CORS 已放行故不受影响，这才出现「接口通、图片挂」的分裂）。
+// 故这里把该类响应头改写为 `cross-origin`。
 //
-// 改法：上游 helmet 是硬编码、无配置开关，且纪律要求**不改上游源码**，
-// 故在我们的引导层（本文件）改写该类响应头的值 —— 只动这一项，不引入中间件。
-// 影响面仅限本进程的 HTTP 响应；App 自身页面资产由 Capacitor 的
-// https://localhost 服务提供，不经过此处。
+// ── (二) CORS 收敛：绝不发 `*`，也绝不放行 `null` ──
+// 上游 config.yaml 的 cors.origin 里**曾经含 "null"**（沙箱 iframe、file://、
+// data: 页面拿到的 Origin 就是 `null`）→ 任何恶意网页都能**读走**本机后端的响应
+//（这正是「无鉴权 loopback SSRF」从「能打」升级为「能读回结果」的一环）。
+// 现在：Access-Control-Allow-Origin 一律**回显**已放行的来源；未放行则删除该头
+//（删除而非置空，避免出现 `ACAO:` 这种半吊子形态）。
+//
+// ── (三) 来源白名单：非本机 App 来源直接 403，且在**处理器之前** ──
+// 两层保障：
+//   1) 请求层（权威）：把 `request` 事件的监听器包一层 —— 来源不合规时回 403 且**不调用**
+//      原监听器，因此 Express 路由零执行，不存在「先产生副作用、再被我们拒掉」的窗口。
+//      上游 CSRF 在本配置下是关闭的（见 config.yaml 的威胁模型说明），
+//      请求层拦截才是真正的边界。
+//      挂载点：`http/https.createServer` 的 handler 参数 + `Server.prototype.on/addListener`。
+//      **不要**改去 patch `EventEmitter.prototype.emit`：本 Node 版本实测该做法会让监听器
+//      静默不再派发（连 `listen()` 回调都不触发），整个服务端失效。
+//   2) 响应层（兜底）：万一响应仍被写出（例如某条路径绕过上面的包装），
+//      setHeader/writeHead 会把 ACAO 收敛或删除，并把该响应改写成 403。
+// 无 Origin 的请求（`<img>`、原生 App、curl、adb forward 调试）不受影响。
+// 注意：Origin/CORS 只是**浏览器侧**防护 —— 同机原生 App 可自带/省略 Origin 头，
+// 天然绕过，这一残余风险见 net-guard.js 顶部「它防护什么、不防护什么」。
 // ---------------------------------------------------------------------------
-function relaxCrossOriginResourcePolicy() {
-    const origSetHeader = http.ServerResponse.prototype.setHeader;
-    http.ServerResponse.prototype.setHeader = function (name, value) {
-        if (typeof name === 'string' && name.toLowerCase() === 'cross-origin-resource-policy') {
-            return origSetHeader.call(this, name, 'cross-origin');
+function installNetworkPolicy() {
+    // 出站：受控 agent 覆盖全局 agent（拒绝环回/私有/保留地址，见 net-guard.js）
+    installGuardedGlobalAgents();
+
+    const proto = http.ServerResponse.prototype;
+    const origSetHeader = proto.setHeader;
+    const origRemoveHeader = proto.removeHeader;
+    const origWriteHead = proto.writeHead;
+    const origWrite = proto.write;
+    const origEnd = proto.end;
+
+    /**
+     * 回 403 并把该响应标记为「已处理」。
+     * 故意绕过本文件 patch 过的方法（orig* 直调）—— 否则会被 (二)/(三) 的钩子吞掉。
+     */
+    const sendOriginForbidden = (res, origin, where) => {
+        res.__tavernOriginScreened = true;
+        res.__tavernOriginBlocked = true;
+        console.warn(`[tavern] 已拒绝非授权来源 ${origin} → ${where}`);
+        try {
+            origSetHeader.call(res, 'Content-Type', 'application/json; charset=utf-8');
+            origWriteHead.call(res, 403);
+            origEnd.call(res, JSON.stringify({
+                error: { message: '已拒绝来自非本机 App 来源的跨源请求' },
+            }));
+        } catch (e) {
+            console.error('[tavern] 拒绝响应写入失败:', e?.message ?? e);
         }
+    };
+
+    /** 该请求的来源是否应被拒绝（无 Origin 视为放行）。 */
+    const isOriginForbidden = (req) => {
+        const origin = req?.headers?.origin;
+        return origin !== undefined && !isAllowedOrigin(origin);
+    };
+
+    /**
+     * 首次写响应时复核来源（兜底层）。
+     * @returns {boolean} true = 已拒绝（已回 403），本次写入须作废
+     */
+    const screenOrigin = (res) => {
+        if (res.__tavernOriginScreened === true) return res.__tavernOriginBlocked === true;
+        res.__tavernOriginScreened = true;
+
+        const req = res.req;
+        if (!isOriginForbidden(req)) return false;
+
+        sendOriginForbidden(res, req.headers.origin, `${req.method} ${req.url}`);
+        return true;
+    };
+
+    // ── 请求层：包装 request 监听器，来源不合规时根本不调用它 ──
+    const ORIGIN_GUARDED = Symbol.for('tavern.originGuarded');
+    const guardRequestListener = (listener) => {
+        if (typeof listener !== 'function' || listener[ORIGIN_GUARDED] === true) return listener;
+        const guarded = function (req, res) {
+            if (isOriginForbidden(req)) {
+                sendOriginForbidden(res, req.headers.origin, `${req.method} ${req.url}`);
+                return undefined;
+            }
+            return listener.call(this, req, res);
+        };
+        Object.defineProperty(guarded, ORIGIN_GUARDED, { value: true });
+        return guarded;
+    };
+
+    for (const method of ['on', 'addListener', 'prependListener', 'once']) {
+        const orig = http.Server.prototype[method];
+        if (typeof orig !== 'function') continue;
+        http.Server.prototype[method] = function (event, listener) {
+            return event === 'request'
+                ? orig.call(this, event, guardRequestListener(listener))
+                : orig.call(this, event, listener);
+        };
+    }
+
+    for (const mod of [http, https]) {
+        const origCreateServer = mod.createServer;
+        mod.createServer = function (...args) {
+            return origCreateServer.apply(this, args.map(guardRequestListener));
+        };
+    }
+
+    /** 按策略改写一组 writeHead 头对象（不改写入参对象）。 */
+    const sanitizeCorsHeaders = (res, headers) => {
+        if (!headers || typeof headers !== 'object') return headers;
+        const key = Object.keys(headers).find((k) => k.toLowerCase() === 'access-control-allow-origin');
+        if (key === undefined) return headers;
+        const allow = corsAllowValue(res.req?.headers?.origin);
+        const copy = { ...headers };
+        if (allow === null) delete copy[key];
+        else copy[key] = allow;
+        return copy;
+    };
+
+    proto.setHeader = function (name, value) {
+        if (typeof name === 'string') {
+            const lower = name.toLowerCase();
+            if (lower === 'cross-origin-resource-policy') {
+                return origSetHeader.call(this, name, 'cross-origin');
+            }
+            if (lower === 'access-control-allow-origin') {
+                if (screenOrigin(this)) return this;
+                const allow = corsAllowValue(this.req?.headers?.origin);
+                if (allow === null) {
+                    return typeof origRemoveHeader === 'function'
+                        ? origRemoveHeader.call(this, name)
+                        : origSetHeader.call(this, name, '');
+                }
+                return origSetHeader.call(this, name, allow);
+            }
+        }
+        if (screenOrigin(this)) return this;
         return origSetHeader.call(this, name, value);
+    };
+
+    proto.writeHead = function (statusCode, statusMessageOrHeaders, headers) {
+        if (screenOrigin(this)) return this;
+        return typeof statusMessageOrHeaders === 'string'
+            ? origWriteHead.call(this, statusCode, statusMessageOrHeaders, sanitizeCorsHeaders(this, headers))
+            : origWriteHead.call(this, statusCode, sanitizeCorsHeaders(this, statusMessageOrHeaders));
+    };
+
+    proto.write = function (...args) {
+        // write() 的返回值是背压信号；被拒绝时按「已写入」返回，避免上游逻辑据此报错
+        if (screenOrigin(this)) return true;
+        return origWrite.apply(this, args);
+    };
+
+    proto.end = function (...args) {
+        if (screenOrigin(this)) return this;
+        return origEnd.apply(this, args);
     };
 }
 
@@ -322,8 +493,16 @@ async function bootUpstream() {
 //   1) server.js 不存在            → bootUpstream 内 startFallbackApi()
 //   2) import(server.js) 抛异常    → bootUpstream 内 startFallbackApi()
 //   3) 上游启动链异步失败 exit(1)  → 上方 process.exit 拦截器 startFallbackApi()
-relaxCrossOriginResourcePolicy();
+//
+// 注：网络策略（installNetworkPolicy）已在文件顶部调用，早于此处 —— 顺序有意义，
+// 见该调用处的注释。
 await bootUpstream();
+
+// 必须在这里**重申**一次出站 agent：上游 `src/server-main.js:109-110` 在启动链里
+// 无条件执行 `http.globalAgent = new http.Agent({keepAlive: ...})`（https 同理），
+// 会把上面装好的受控 agent 覆盖掉（真机 logcat 实测：启动日志里出现了
+// 「全局出站 agent 被替换」的告警）。不重申 = 模型代理链路实际无防护。
+installGuardedGlobalAgents();
 
 process.on('uncaughtException', (e) => {
     console.error('[tavern] uncaughtException:', e?.stack ?? e);
